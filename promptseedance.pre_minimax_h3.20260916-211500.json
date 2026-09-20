@@ -1,0 +1,164 @@
+[
+  {
+    "video_type": "partially NSFW",
+    "duration": "approximately 12 seconds",
+    "aspect_ratio": "9:16",
+    "overall_scene_summary": "A female subject on a shaded outdoor wooden dock stands up rapidly from a bent-over position, expels water from her mouth, wipes her face, and speaks to the camera against a brightly lit background of a grassy hill and residential waterfront.",
+    "detailed_analysis": {
+      "subject_motion": {
+        "torso_orientation": "Initially horizontal and flexed forward, facing away from the camera. Rapidly extends to a vertical, upright posture, rotating 180 degrees to face the camera.",
+        "hip_rotation": "Initially facing directly away from the camera. Rotates sharply to face the camera during the transition to standing.",
+        "leg_positions": "Initially knees are mostly extended with weight on both feet. Upon standing, weight is evenly distributed, knees slightly softly bent. Lower legs become out of frame.",
+        "arm_positions": "Initially hanging downward. Upon standing, arms raise to mid-torso level. Right arm raises further to touch the face. Left arm remains flexed at the elbow near the waist.",
+        "exact_hand_placement": "Anatomical right hand touches the right side of the forehead, then moves to wipe the mouth and chin. Anatomical left hand is held at waist height, palm facing upward, fingers loosely curled.",
+        "head_orientation": "Initially flexed downward, face not visible. Rapidly extends upward and rotates to face the camera. Exhibits subtle shaking and downward tilting while coughing.",
+        "expressions": "Initially not visible. Transitions to a surprised, slightly disoriented expression with eyes wide and mouth open while expelling water. Forehead wrinkles. Ends with a smile, relaxed lips, and relaxed brow.",
+        "additional_motion_notes": "The transition from bent-over to standing is explosive and fast, accompanied by the physical action of spitting water."
+      },
+      "camera": {
+        "camera_height": "Starts approximately at the subject's hip height, adjusting slightly upward to chest height as the subject stands.",
+        "camera_angle": "Starts pointing slightly downward, tilts upward to a neutral, eye-level angle as the subject stands.",
+        "camera_distance": "Close distance, maintaining a medium-close shot once the subject is standing.",
+        "framing": "Initially frames the posterior pelvic region and mid-back. Transitions to a medium shot framing the subject from mid-thigh to slightly above the head.",
+        "crop": "Lower legs and feet are mostly cropped out of frame after the subject stands up.",
+        "perspective": "First-person observer perspective.",
+        "estimated_lens_appearance": "Standard smartphone wide-angle lens, resulting in a deep depth of field.",
+        "camera_movement": "Handheld with mild instability. Quick tilt up and slight pull-back to accommodate the subject's vertical extension.",
+        "additional_camera_notes": "The camera acts dynamically to reframe the subject from a bent posture to a standing posture."
+      },
+      "environment": {
+        "location_type": "Outdoor waterfront wooden dock structure with a roof.",
+        "background_description": "A sunny, landscaped waterfront property. Features dark green water in the immediate foreground beneath the dock. The midground contains a stone retaining wall, a grassy slope, white Adirondack chairs, and a fire pit area. The far background includes trees and part of a white residential building with windows.",
+        "bed_room": "Not applicable.",
+        "furniture": "White Adirondack-style lounge chairs visible on the grass in the background.",
+        "visible_objects": "Black vertical metal structural beams of the dock, a yellow electrical cord hanging over the water, a grey electrical box on the dock, white flowers on bushes in the background.",
+        "materials": "Wooden dock planks, dark painted metal beams, corrugated metal roof, natural stone wall, grass, water.",
+        "colors": "Brown wood, black metal, deep green water, bright green grass, white chairs, white house, grey stones.",
+        "spatial_relationships": "Subject is in the immediate foreground, under the shade of the dock roof. The metal beams frame the subject on the left and right. The water is directly behind the subject's legs. The grassy hill is across the water in the midground.",
+        "background_changes_during_video": "Due to the camera tilt, the framing of the background shifts from showing mostly water and the dock floor to revealing the grassy hill, chairs, and house.",
+        "additional_environment_notes": "The depth of field is deep, keeping the background relatively in focus."
+      },
+      "light": {
+        "direction": "The primary light source is the sun illuminating the background from above and slightly behind the subject.",
+        "intensity": "High intensity in the background, lower ambient intensity in the foreground under the dock roof.",
+        "softness": "The subject is illuminated by soft, diffused, indirect ambient light bouncing under the dock structure.",
+        "color_temperature": "Daylight, warm ambient tones.",
+        "shadow_placement": "Soft shadows on the subject due to diffuse lighting. Darker shadows under the dock structure.",
+        "practical_lights": "None visible.",
+        "additional_light_notes": "The lighting creates a strong contrast between the shaded foreground subject and the brightly exposed sunny background. Slight rim light is visible on the subject's hair."
+      },
+      "wardrobe_body_visibility": {
+        "exact_garments": "A two-piece white bikini. The top is a classic triangle halter style with thin strings tying behind the neck. The bottom is a classic cut with large gold metal chain-link hardware connecting the front and back panels at the hips.",
+        "garment_colors": "Solid white fabric, gold metal hardware.",
+        "garment_materials": "Smooth, stretch swimwear fabric.",
+        "garment_position": "Fitted tightly to the body. The top covers the breasts with prominent cleavage visible. The bottom covers the pelvic region and partially covers the glutes.",
+        "garment_fit": "Fitted, stretched.",
+        "fabric_behavior": "The fabric remains securely in place during the rapid standing motion. Tension is visible on the halter strings.",
+        "wardrobe_interactions": "No direct hand interaction with the garments.",
+        "which_areas_are_visible": "Posterior glutes, back, shoulders, arms, anterior torso, cleavage, abdomen, face, and thighs are visible.",
+        "additional_wardrobe_visibility_notes": "Accessories include a delicate gold pendant necklace, small gold hoop earrings, and a gold chain bracelet on the right wrist. White nail polish is visible."
+      },
+      "composition": {
+        "subject_location_within_frame": "Centered.",
+        "negative_space": "Present in the upper corners and around the subject's torso, revealing the background.",
+        "foreground": "Subject and the wooden dock floor.",
+        "midground": "Water and black metal dock pillars.",
+        "background": "Stone wall, grassy hill, white chairs, and house.",
+        "relative_position_of_surrounding_objects": "Black metal pillars run vertically on the left and right thirds of the frame, framing the subject. The yellow cord hangs slightly camera-right of the subject.",
+        "additional_composition_notes": "The verticality of the framing emphasizes the subject's standing motion and the vertical metal pillars of the dock."
+      },
+      "audio": {
+        "dialogue": "Oh my god. That was so much.",
+        "background_audio": "Ambient outdoor sounds, water sounds.",
+        "music": "None.",
+        "environmental_sounds": "The sound of water being forcefully expelled from the mouth, followed by light coughing and gasping for air."
+      },
+      "sequence": [
+        {
+          "phase": "Initially",
+          "action": "Subject is bent over 90 degrees at the hips.",
+          "expression": "Not visible.",
+          "hands": "Hanging down out of frame.",
+          "posture": "Spine horizontal, buttocks facing the camera.",
+          "head": "Pointed downward, away from camera.",
+          "wardrobe_interaction": "Bikini bottom is stretched over the glutes.",
+          "camera": "Framing the posterior pelvic region, angled slightly down.",
+          "background": "Wooden dock floor and water visible.",
+          "audio": "Ambient sounds."
+        },
+        {
+          "phase": "Shortly after",
+          "action": "Subject rapidly stands up and turns 180 degrees to face the camera, expelling a stream of water from the mouth.",
+          "expression": "Eyes wide, mouth open expelling water, brows furrowed.",
+          "hands": "Both hands raise rapidly towards the torso.",
+          "posture": "Vertical, upright, shoulders slightly hunched.",
+          "head": "Swinging upward and rotating right to face forward.",
+          "wardrobe_interaction": "Bikini top stays fitted over the breasts as she rotates.",
+          "camera": "Tilting up rapidly to follow the subject's head.",
+          "background": "Background shifts to reveal grassy hill, chairs, and house.",
+          "audio": "Sound of spitting water and coughing."
+        },
+        {
+          "phase": "Next",
+          "action": "Subject finishes expelling water and catches her breath.",
+          "expression": "Disoriented, mouth slightly open, eyes blinking.",
+          "hands": "Anatomical right hand raises to the forehead.",
+          "posture": "Standing upright, slightly leaning forward.",
+          "head": "Facing camera, slight downward tilt.",
+          "wardrobe_interaction": "None.",
+          "camera": "Stable medium shot.",
+          "background": "Stable view of the waterfront property.",
+          "audio": "Gasping and coughing."
+        },
+        {
+          "phase": "Then",
+          "action": "Subject wipes her face.",
+          "expression": "Relieved, brows relaxing.",
+          "hands": "Anatomical right fingers brush the right forehead, then the right hand wipes the mouth and chin. Anatomical left hand is held open at waist height.",
+          "posture": "Standing upright, relaxed.",
+          "head": "Facing camera.",
+          "wardrobe_interaction": "None.",
+          "camera": "Stable medium shot.",
+          "background": "Stable.",
+          "audio": "Breathing."
+        },
+        {
+          "phase": "Finally",
+          "action": "Subject speaks to the camera and smiles.",
+          "expression": "Smiling, eyes focused on the camera lens.",
+          "hands": "Right hand lowers slightly from the face. Left hand remains semi-cupped.",
+          "posture": "Standing upright, relaxed weight distribution.",
+          "head": "Facing camera, slight head nod while speaking.",
+          "wardrobe_interaction": "None.",
+          "camera": "Stable medium shot.",
+          "background": "Stable.",
+          "audio": "Speaks: 'Oh my god. That was so much.'"
+        }
+      ],
+      "uncertainties": [
+        "Lower leg and foot placement cannot be determined after the subject stands up due to being cropped out of frame."
+      ]
+    },
+    "generation_prompt": "Vertical 9:16 video. First-person handheld camera perspective. Initially, the camera looks slightly down at a female subject bent over 90 degrees at the hips, facing away, wearing a fitted white triangle bikini with gold chain-link hip hardware. The foreground is a shaded wooden dock; the background shows deep green water. Suddenly, the subject rapidly stands up, turning 180 degrees to face the camera, expelling a stream of water from her mouth. The camera tilts up to follow her, settling into a medium shot from mid-thigh up. As she stands, the background reveals a brightly lit, sunny outdoor scene with a grassy hill, a stone retaining wall, white Adirondack chairs, and a white house across the water. Black metal dock beams frame her on the left and right. She wears a delicate gold necklace and a gold bracelet on her right wrist. Her expression shows surprise and disorientation. Her left arm rests flexed at waist height with an open palm. Her right hand raises to brush her right forehead, then wipes her mouth and chin. Finally, she relaxes into a smile, looks directly into the camera, and says 'Oh my god. That was so much.' The lighting remains consistent: soft diffuse shade on the subject and bright sunlight on the deep background. The white bikini and gold hardware remain consistently fitted throughout the movement without shifting.",
+    "hard_constraints": [
+      "Preserve the original background and environment from the reference video.",
+      "Preserve the original wardrobe from the reference video.",
+      "Preserve garment colors, materials, placement and visible styling.",
+      "Preserve interactions between the subject and the clothing.",
+      "Preserve the original order of actions.",
+      "Preserve the original camera behavior and framing.",
+      "Preserve the original lighting and scene composition.",
+      "Do not invent dialogue.",
+      "Do not modify existing dialogue.",
+      "Do not translate existing dialogue.",
+      "Do not describe facial identity.",
+      "Do not describe the person's body proportions as identity characteristics.",
+      "Do not describe skin tone, eye color, ethnicity or other identifying characteristics.",
+      "Do not transfer the identity of the person in the reference video.",
+      "If a detail is not visible or unclear, explicitly state that instead of inventing it."
+    ],
+    "id": "P01",
+    "name": "A female subject on a shaded outdoor wooden dock stands up rapidly from a bent-over position, expels water from her mout",
+    "text": "Vertical 9:16 video. First-person handheld camera perspective. Initially, the camera looks slightly down at a female subject bent over 90 degrees at the hips, facing away, wearing a fitted white triangle bikini with gold chain-link hip hardware. The foreground is a shaded wooden dock; the background shows deep green water. Suddenly, the subject rapidly stands up, turning 180 degrees to face the camera, expelling a stream of water from her mouth. The camera tilts up to follow her, settling into a medium shot from mid-thigh up. As she stands, the background reveals a brightly lit, sunny outdoor scene with a grassy hill, a stone retaining wall, white Adirondack chairs, and a white house across the water. Black metal dock beams frame her on the left and right. She wears a delicate gold necklace and a gold bracelet on her right wrist. Her expression shows surprise and disorientation. Her left arm rests flexed at waist height with an open palm. Her right hand raises to brush her right forehead, then wipes her mouth and chin. Finally, she relaxes into a smile, looks directly into the camera, and says 'Oh my god. That was so much.' The lighting remains consistent: soft diffuse shade on the subject and bright sunlight on the deep background. The white bikini and gold hardware remain consistently fitted throughout the movement without shifting."
+  }
+]

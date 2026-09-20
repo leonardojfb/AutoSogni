@@ -1,0 +1,97 @@
+SOGNI SUPPORT INCIDENT REPORT
+=============================
+
+Subject: Critical prompt mismatch in Creative Agent workflow: dialogue replaced by another prompt
+
+Hello Sogni Support,
+
+I am experiencing a serious prompt integrity issue with the Creative Agent API.
+
+WORKFLOW DETAILS
+----------------
+Workflow ID: wf_durable_workflow_2541e4ad-4dd8-4e56-a92d-a21ed3b518af
+Campaign: 45
+Job: 570
+Job title: New Sogni Campaign - Job 0002
+Tool: animate_photo
+Model: minimax-h3-fl2va-fp8_i2v
+Workflow model: minimax-h3-i2v
+Duration: 10 seconds
+Aspect ratio: 9:16
+Created: 2026-09-20T01:10:52.694Z
+Completed: 2026-09-20T01:17:28.977Z
+
+PROMPT SENT TO THE API
+----------------------
+The API request contained this prompt, including spoken dialogue:
+
+integrated_multimodal_description:
+Duration: approximately 10.3 seconds.
+[Shot 1] The woman (S1) faces toward the camera and begins speaking with her mouth opening and closing in rhythm with her words, her eyes directed primarily toward the camera. The woman (S1) says: <d>[English] Here's the thing, if your wife isn't spoiling you the second that you get home from work, maybe you're with the wrong girl, because I just feel like, as</d> While speaking she makes subtle head tilts and slight turns, her gaze remaining mostly on the camera with occasional blinks and small shifts. Shortly afterward she continues. The woman (S1) says: <d>[English] a wife, you should always be spoiling your man.</d> As she finishes speaking her expression stays engaged, with her mouth closing after the final words and her gaze held toward the camera. The camera shows subtle handheld bobbing throughout.
+
+overall_soundscape:
+Spoken dialogue with natural speech rhythm, pauses, and intonation; faint room tone.
+
+non_diegetic_music:
+None.
+
+The workflow response confirms that this prompt was received correctly:
+
+- input.arguments.prompt contained the dialogue above.
+- normalizedArguments.prompt contained the same dialogue.
+- promptExpansion.originalPrompt also contained the same dialogue.
+
+INCORRECT EFFECTIVE PROMPT
+--------------------------
+However, generation.params.positivePrompt contained a completely different prompt:
+
+For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
+integrated_multimodal_description: [Shot 1] The shot opens on a close-up of a blonde woman with freckles and blue eyes, wearing a dark grey ribbed tank top, sitting on a blue and white striped pool float in a swimming pool. She faces the camera directly under bright sunlight, with palm trees and a clear blue sky visible in the background. Her skin glistens slightly, indicating she is wet or sunbathing. The woman (S1) begins speaking to the camera, her mouth opening and closing naturally as she delivers her lines. She maintains steady eye contact with the lens, occasionally blinking and making subtle head tilts for emphasis. Her expression is engaging and conversational. As she finishes her sentence, her mouth closes and she holds her gaze toward the camera. The camera exhibits a slight handheld bobbing motion throughout the duration, consistent with a selfie-style recording.
+
+overall_soundscape: Clear spoken dialogue from the woman (S1) with natural speech rhythm and intonation; faint ambient pool sounds and room tone.
+
+non_diegetic_music: N/A
+
+This effective prompt contains no part of the requested dialogue.
+
+REFERENCE IMAGE
+---------------
+The workflow used this media reference:
+
+https://artist-upload-production.s3-accelerate.amazonaws.com/2026-09-20/569/startingImage.png
+
+The media reference was declared as image/png. The same uploaded image appears to have been reused between jobs.
+
+LOCAL LOG EVIDENCE
+------------------
+The complete local log is available as:
+
+logs/autosogni.log.2
+
+Relevant evidence:
+
+- Line 3: workflow title New Sogni Campaign - Job 0002.
+- Lines 1-123: workflow ID, input arguments, and normalized prompt containing the correct dialogue.
+- Line 13991: generation.params.positivePrompt containing the incorrect pool description.
+- Line 14443: the same incorrect positivePrompt repeated in the workflow response.
+
+The local client did not replace the prompt before submission. The prompt logged before submission, input.arguments.prompt, normalizedArguments.prompt, and promptExpansion.originalPrompt all contained the correct dialogue. The mismatch appeared later inside the Sogni workflow response, specifically in generation.params.positivePrompt.
+
+QUESTIONS FOR SUPPORT
+---------------------
+
+1. Why was generation.params.positivePrompt different from input.arguments.prompt?
+2. Is this caused by the Creative Agent prompt expansion system?
+3. Is the expansion or visual description cached by the reference image?
+4. Could the same uploaded image cause a previous prompt's visual description to be reused?
+5. Is there a way to disable prompt expansion?
+6. Is there a way to force the exact submitted prompt to be used as the final generation prompt?
+7. Is this a known issue with animate_photo and MiniMax H3?
+8. Can you confirm whether this workflow generated the video using the incorrect positivePrompt?
+9. Can the credits for this workflow be refunded or restored, since the generated prompt did not match the submitted prompt?
+
+Please investigate the server-side workflow trace for this workflow ID. This should not be treated as a normal creative rewrite: the spoken dialogue was completely removed from the effective generation prompt.
+
+I can provide the complete workflow response and application logs if needed. I have intentionally not included any API key or authorization secret in this report.
+
+Thank you.

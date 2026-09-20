@@ -1,0 +1,35 @@
+# Sogni Video Automator
+
+Local Windows desktop app for persistent Frame x Prompt image-to-video campaigns through the Sogni API.
+
+## Run
+
+```powershell
+py -m pip install -r requirements.txt
+py -m app.main
+```
+
+Set `SOGNI_API_KEY` or save it in the Settings tab. The app stores local state in `data/app.db`.
+
+## Current Flow
+
+1. Fetch video models from Sogni.
+2. Select a frames folder (`.png`, `.jpg`, `.jpeg`, `.webp`).
+3. Import prompts from `.json`, `.csv`, or `.txt`.
+4. Create a campaign. All Frame x Prompt jobs are persisted before execution.
+5. Choose duration mode: manual seconds or automatic detection from each prompt.
+6. Choose the video format/aspect ratio, such as `9:16`, `16:9`, `1:1`, or `4:5`.
+7. Start/resume the queue. Default concurrency is 1.
+8. Soft pause sets the campaign to `PAUSE_REQUESTED`; the active job is allowed to finish.
+
+## Sogni API Notes
+
+The integration uses the current Sogni docs as of 2026-09-14:
+
+- Model catalog: `GET /v1/model-catalog?mediaType=video&include=parameters`
+- Workflow start: `POST /v1/creative-agent/workflows`
+- Idempotency header: `Idempotency-Key`
+- Workflow read/polling: `GET /v1/creative-agent/workflows/:id`
+- Image pre-upload: `GET /v2/image/uploadUrl`
+
+API-specific behavior is isolated in `app/sogni/`.

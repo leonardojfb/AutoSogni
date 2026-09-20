@@ -1,0 +1,7 @@
+[
+  {
+    "id": "P01",
+    "name": "Example prompt",
+    "text": "The video is a single continuous shot lasting approximately 8 seconds in a vertical 9:16 aspect ratio. The camera is a fixed smartphone camera with subtle natural movement. There are no cuts or visual discontinuities.\n\n00:00 The subject looks directly into the camera with a neutral expression.\n\n00:01 The subject begins speaking at a natural conversational pace: \"Hello there.\"\n\n00:02 The subject maintains eye contact and gently smiles.\n\n00:04 The subject continues speaking: \"This is the second line.\"\n\n00:06 The subject pauses briefly while maintaining the smile.\n\n00:08 The video ends abruptly."
+  }
+]

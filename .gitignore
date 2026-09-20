@@ -1,0 +1,26 @@
+# Local secrets and runtime state
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/sogni_api_key.txt
+
+# Generated application output
+build/
+dist/
+logs/
+*.log
+
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Generated media and local input assets
+talking/
+ttas/
+*.mp4
+*.mov
+*.avi
