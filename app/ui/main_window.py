@@ -819,24 +819,6 @@ class MainWindow(QMainWindow):
             self.repo.update_campaign_status(self.current_campaign_id, "PAUSE_REQUESTED")
             self._refresh_tables()
 
-
-if Qt is not None:
-    from PySide6.QtCore import QEvent
-
-    class _RefreshEvent(QEvent):
-        TYPE = QEvent.Type(QEvent.registerEventType())
-
-        def __init__(self) -> None:
-            super().__init__(self.TYPE)
-
-    class _WaveSpeedEvent(QEvent):
-        TYPE = QEvent.Type(QEvent.registerEventType())
-
-        def __init__(self, kind: str, payload) -> None:
-            super().__init__(self.TYPE)
-            self.kind = kind
-            self.payload = payload
-
     def customEvent(self, event):
         if event.type() == _RefreshEvent.TYPE:
             self._queue_running = False
@@ -877,7 +859,23 @@ if Qt is not None:
             else:
                 self.wavespeed_status_label.setText(f"Tareas eliminadas: {payload}")
 
-    MainWindow.customEvent = customEvent
+
+if Qt is not None:
+    from PySide6.QtCore import QEvent
+
+    class _RefreshEvent(QEvent):
+        TYPE = QEvent.Type(QEvent.registerEventType())
+
+        def __init__(self) -> None:
+            super().__init__(self.TYPE)
+
+    class _WaveSpeedEvent(QEvent):
+        TYPE = QEvent.Type(QEvent.registerEventType())
+
+        def __init__(self, kind: str, payload) -> None:
+            super().__init__(self.TYPE)
+            self.kind = kind
+            self.payload = payload
 
 
 def _job_status_label(status: str) -> str:

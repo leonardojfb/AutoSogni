@@ -55,3 +55,14 @@ def test_clicking_frame_row_loads_thumbnail_preview(tmp_path: Path):
     assert "Blue Test" in window.frame_preview_meta.text()
     assert "WaveSpeed" in [window.tabs.tabText(index) for index in range(window.tabs.count())]
     assert window.wavespeed.MODEL_ID == "alibaba/wan-3.0/reference-to-video"
+
+
+def test_wavespeed_event_handler_belongs_to_main_window(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+
+    assert "_handle_wavespeed_event" in type(window).__dict__

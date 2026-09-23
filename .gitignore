@@ -3,6 +3,7 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 data/sogni_api_key.txt
+data/wavespeed_api_key.txt
 
 # Generated application output
 build/
