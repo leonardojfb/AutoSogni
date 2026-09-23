@@ -4,12 +4,15 @@ data/*.sqlite
 data/*.sqlite3
 data/sogni_api_key.txt
 data/wavespeed_api_key.txt
+data/wavespeed_history.json
+data/wavespeed_queue.json
 
 # Generated application output
 build/
 dist/
 logs/
 *.log
+data/wavespeed_outputs/
 
 # Python cache and local environments
 __pycache__/

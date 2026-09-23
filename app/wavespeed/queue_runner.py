@@ -78,9 +78,18 @@ class WaveSpeedQueueRunner:
                 except Exception:
                     item.price = None
 
-                prediction = self.client.submit(payload)
-                item.task_id = prediction.id
-                self._notify(item)
+                if item.task_id:
+                    try:
+                        prediction = self.client.get_result(item.task_id)
+                    except Exception as exc:
+                        item.status = QueueStatus.FAILED
+                        item.error = f"No se pudo recuperar el task {item.task_id}: {exc}"
+                        self._notify(item)
+                        continue
+                else:
+                    prediction = self.client.submit(payload)
+                    item.task_id = prediction.id
+                    self._notify(item)
                 if prediction.status in TERMINAL_STATUSES:
                     result = prediction
                 else:

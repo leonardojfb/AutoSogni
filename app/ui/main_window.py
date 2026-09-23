@@ -15,6 +15,8 @@ from app.sogni.auth import ApiKeyStore
 from app.utils.paths import data_dir
 from app.wavespeed.client import WaveSpeedClient
 from app.wavespeed.history import WaveSpeedHistoryStore
+from app.wavespeed.queue import QueueStatus, WaveSpeedQueueItem, WaveSpeedQueueStore
+from app.wavespeed.queue_runner import WaveSpeedQueueRunner
 from app.ui.wavespeed_queue import WaveSpeedQueueWidget
 from app.wavespeed.validation import (
     ASPECT_RATIOS as WAVESPEED_ASPECT_RATIOS,
@@ -68,6 +70,10 @@ class MainWindow(QMainWindow):
         self.wavespeed_key_store = wavespeed_key_store or ApiKeyStore(data_dir() / "wavespeed_api_key.txt")
         self.wavespeed = wavespeed_client or WaveSpeedClient(self.wavespeed_key_store.get())
         self.wavespeed_history = WaveSpeedHistoryStore()
+        self.wavespeed_queue_store = WaveSpeedQueueStore()
+        self._wavespeed_queue_cancel_event = threading.Event()
+        self._wavespeed_queue_running = False
+        self._wavespeed_queue_active = None
         self._wavespeed_task_id: str | None = None
         self._wavespeed_cancel_event = threading.Event()
         self._wavespeed_uploaded: dict[str, dict] = {}
@@ -357,6 +363,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.wavespeed_raw_edit)
 
         self.wavespeed_queue_widget = WaveSpeedQueueWidget()
+        self.wavespeed_queue_widget.start_requested.connect(self._start_wavespeed_queue)
+        self.wavespeed_queue_widget.pause_requested.connect(self._pause_wavespeed_queue)
+        self.wavespeed_queue_widget.retry_requested.connect(self._retry_wavespeed_item)
+        self.wavespeed_queue_widget.retry_failed_requested.connect(self._retry_wavespeed_failed)
+        self.wavespeed_queue_widget.clear_completed_requested.connect(self._clear_wavespeed_completed)
+        self.wavespeed_queue_widget.queue_changed.connect(self._save_wavespeed_queue)
+        self.wavespeed_queue_widget.load_queue(self.wavespeed_queue_store.load())
         layout.addWidget(self.wavespeed_queue_widget)
 
         self.wavespeed_history_table = QTableWidget(0, 5)
@@ -537,6 +550,101 @@ class MainWindow(QMainWindow):
             return balance
 
         self._run_wavespeed_worker(task, "balance")
+
+    def _save_wavespeed_queue(self) -> None:
+        if not hasattr(self, "wavespeed_queue_widget"):
+            return
+        self.wavespeed_queue_store.save(self.wavespeed_queue_widget.queue())
+
+    def _start_wavespeed_queue(self) -> None:
+        if self._wavespeed_queue_running:
+            return
+        queue = self.wavespeed_queue_widget.queue()
+        if not queue.frame_path:
+            self.wavespeed_queue_widget.set_error("Seleccioná un frame compartido.")
+            return
+        try:
+            validate_local_reference_file(Path(queue.frame_path), "reference_images")
+            if not queue.items:
+                raise ValueError("Agregá al menos un video a la cola.")
+            for item in queue.items:
+                validate_local_reference_file(Path(item.video_path), "reference_videos")
+                if not item.prompt.strip():
+                    raise ValueError(f"El ítem {item.item_id} no tiene prompt.")
+        except Exception as exc:
+            self.wavespeed_queue_widget.set_error(str(exc))
+            return
+
+        queue.paused = False
+        self._wavespeed_queue_active = queue
+        self._wavespeed_queue_cancel_event.clear()
+        self._wavespeed_queue_running = True
+        self.wavespeed_queue_widget.set_running(True)
+        self.wavespeed_queue_store.save(queue)
+        self.wavespeed_queue_widget.set_error("Cola iniciada.")
+        thread = threading.Thread(target=self._run_wavespeed_queue, args=(queue,), daemon=True)
+        thread.start()
+
+    def _run_wavespeed_queue(self, queue) -> None:
+        runner = WaveSpeedQueueRunner(
+            self.wavespeed,
+            upload_file=self.wavespeed.upload_file,
+            save_output=lambda output, output_dir, task_id: self._wavespeed_save_output(
+                output,
+                {"output_dir": output_dir},
+                task_id,
+            ),
+            on_update=lambda item: self._wavespeed_queue_item_update(queue, item),
+        )
+        error = None
+        try:
+            runner.run(queue, cancel_event=self._wavespeed_queue_cancel_event)
+        except Exception as exc:
+            error = exc
+        finally:
+            self.wavespeed_queue_store.save(queue)
+            self._post_wavespeed_event("queue_finished", error)
+
+    def _wavespeed_queue_item_update(self, queue, item: WaveSpeedQueueItem) -> None:
+        self.wavespeed_queue_store.save(queue)
+        self._post_wavespeed_event("queue_item", item)
+
+    def _pause_wavespeed_queue(self) -> None:
+        if not self._wavespeed_queue_running or self._wavespeed_queue_active is None:
+            return
+        self._wavespeed_queue_active.paused = True
+        self.wavespeed_queue_store.save(self._wavespeed_queue_active)
+        self.wavespeed_queue_widget.set_error("La cola se pausará después del ítem actual.")
+
+    def _retry_wavespeed_item(self, item_id: str) -> None:
+        queue = self.wavespeed_queue_widget.queue()
+        item = next((value for value in queue.items if value.item_id == item_id), None)
+        if item is None or item.status == QueueStatus.RUNNING:
+            return
+        item.retry()
+        queue.paused = False
+        self.wavespeed_queue_store.save(queue)
+        self.wavespeed_queue_widget.set_item_update(item)
+        if not self._wavespeed_queue_running:
+            self._start_wavespeed_queue()
+
+    def _retry_wavespeed_failed(self) -> None:
+        queue = self.wavespeed_queue_widget.queue()
+        for item in queue.items:
+            if item.status == QueueStatus.FAILED:
+                item.retry()
+        queue.paused = False
+        self.wavespeed_queue_store.save(queue)
+        for item in queue.items:
+            self.wavespeed_queue_widget.set_item_update(item)
+        if not self._wavespeed_queue_running:
+            self._start_wavespeed_queue()
+
+    def _clear_wavespeed_completed(self) -> None:
+        queue = self.wavespeed_queue_widget.queue()
+        queue.items = [item for item in queue.items if item.status != QueueStatus.COMPLETED]
+        self.wavespeed_queue_widget.load_queue(queue)
+        self.wavespeed_queue_store.save(queue)
 
     def _wavespeed_estimate_price(self) -> None:
         snapshot = self._wavespeed_snapshot()
@@ -862,6 +970,16 @@ class MainWindow(QMainWindow):
                 self.wavespeed_status_label.setText(f"Error: {payload}")
             else:
                 self.wavespeed_status_label.setText(f"Tareas eliminadas: {payload}")
+        elif kind == "queue_item":
+            self.wavespeed_queue_widget.set_item_update(payload)
+        elif kind == "queue_finished":
+            self._wavespeed_queue_running = False
+            self._wavespeed_queue_active = None
+            self.wavespeed_queue_widget.set_running(False)
+            if isinstance(payload, Exception):
+                self.wavespeed_queue_widget.set_error(str(payload))
+            else:
+                self.wavespeed_queue_widget.set_error("Cola finalizada.")
 
 
 if Qt is not None:

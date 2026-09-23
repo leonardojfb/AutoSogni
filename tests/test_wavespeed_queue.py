@@ -20,6 +20,10 @@ class FakeWaveSpeedClient:
         self.events.append(("submit", payload["prompt"]))
         return WaveSpeedPrediction(task_id, "created")
 
+    def get_result(self, task_id):
+        self.events.append(("get", task_id))
+        return self.results[task_id]
+
     def poll_result(self, task_id, *, sleep=None, on_update=None, cancel_event=None):
         result = self.results[task_id]
         if on_update:
@@ -140,3 +144,57 @@ def test_runner_reuses_shared_frame_upload_and_honors_pause(tmp_path):
     client.events.clear()
     WaveSpeedQueueRunner(client, upload_file=upload, save_output=lambda *_args: "").run(queue)
     assert not any(event[0] == "submit" for event in client.events)
+
+
+def test_store_recovers_inflight_items_as_pending_without_losing_task_id(tmp_path):
+    store = WaveSpeedQueueStore(tmp_path / "queue.json")
+    queue = WaveSpeedQueue(
+        items=[
+            WaveSpeedQueueItem(
+                item_id="1",
+                video_path="ref.mp4",
+                prompt="Walk",
+                status=QueueStatus.RUNNING,
+                task_id="pred-1",
+            )
+        ]
+    )
+
+    store.save(queue)
+    restored = store.load()
+
+    assert restored.items[0].status == QueueStatus.PENDING
+    assert restored.items[0].task_id == "pred-1"
+
+
+def test_runner_recovers_existing_task_without_duplicate_submission(tmp_path):
+    events = []
+    client = FakeWaveSpeedClient(
+        events,
+        results={"pred-existing": WaveSpeedPrediction("pred-existing", "completed", outputs=["url-1"])},
+    )
+    queue = WaveSpeedQueue(
+        frame_path="frame.png",
+        output_dir=str(tmp_path),
+        items=[
+            WaveSpeedQueueItem(
+                item_id="1",
+                video_path="one.mp4",
+                prompt="One",
+                task_id="pred-existing",
+            )
+        ],
+    )
+
+    from app.wavespeed.queue_runner import WaveSpeedQueueRunner
+
+    result = WaveSpeedQueueRunner(
+        client,
+        upload_file=lambda path: {"download_url": f"https://cdn/{path}"},
+        save_output=lambda output, output_dir, task_id: str(tmp_path / f"{task_id}.mp4"),
+        sleep=lambda _seconds: None,
+    ).run(queue)
+
+    assert ("get", "pred-existing") in events
+    assert not any(event[0] == "submit" for event in events)
+    assert result.items[0].status == QueueStatus.COMPLETED

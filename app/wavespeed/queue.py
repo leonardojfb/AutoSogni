@@ -126,7 +126,11 @@ class WaveSpeedQueueStore:
             return WaveSpeedQueue()
         if not isinstance(value, dict):
             return WaveSpeedQueue()
-        return WaveSpeedQueue.from_dict(value)
+        queue = WaveSpeedQueue.from_dict(value)
+        for item in queue.items:
+            if item.status in {QueueStatus.RUNNING, QueueStatus.PAUSED}:
+                item.status = QueueStatus.PENDING
+        return queue
 
     def save(self, queue: WaveSpeedQueue) -> None:
         queue.updated_at = _now()

@@ -8,7 +8,7 @@ from app.database.repositories import CampaignRepository
 from app.sogni.auth import ApiKeyStore
 from app.sogni.client import SogniClient
 from app.ui.main_window import MainWindow
-from app.wavespeed.queue import QueueStatus, WaveSpeedQueue
+from app.wavespeed.queue import QueueStatus, WaveSpeedQueue, WaveSpeedQueueItem, WaveSpeedQueueStore
 
 
 def _app():
@@ -83,3 +83,25 @@ def test_wavespeed_queue_panel_adds_rows_and_exposes_retry(tmp_path: Path):
     assert item.video_path == "video.mp4"
     assert item.status == QueueStatus.PENDING
     assert window.wavespeed_queue_widget.has_retry_control(item.item_id)
+
+
+def test_wavespeed_queue_event_updates_row_and_retry_button(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+    window.wavespeed_queue_store = WaveSpeedQueueStore(tmp_path / "queue.json")
+    window.wavespeed_queue_widget.load_queue(WaveSpeedQueue())
+    item = window.wavespeed_queue_widget.add_item_for_test("video.mp4")
+    item.status = QueueStatus.FAILED
+    item.task_id = "pred-1"
+    item.error = "bad video"
+
+    window._handle_wavespeed_event("queue_item", item)
+
+    assert window.wavespeed_queue_widget.table.item(0, 10).text() == QueueStatus.FAILED
+    assert window.wavespeed_queue_widget.table.item(0, 11).text() == "pred-1"
+    assert window.wavespeed_queue_widget.table.item(0, 13).text() == "bad video"
+    assert window.wavespeed_queue_widget.table.cellWidget(0, 14).isEnabled()
