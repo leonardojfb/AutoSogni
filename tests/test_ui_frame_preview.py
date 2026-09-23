@@ -11,6 +11,7 @@ from app.sogni.client import SogniClient
 from app.ui.main_window import MainWindow
 from app.wavespeed.queue import (
     QueueStatus,
+    WaveSpeedCampaign,
     WaveSpeedCampaignStore,
     WaveSpeedQueue,
     WaveSpeedQueueItem,
@@ -113,8 +114,15 @@ def test_add_to_queue_groups_jobs_by_frame_name(tmp_path: Path):
     db = Database(tmp_path / "app.db")
     db.initialize()
     repo = CampaignRepository(db)
-    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
-    window.wavespeed_queue_store = WaveSpeedQueueStore(tmp_path / "queue.json")
+    campaign_store = WaveSpeedCampaignStore(tmp_path / "campaigns.json")
+    queue_store = WaveSpeedQueueStore(tmp_path / "queue.json")
+    window = MainWindow(
+        repo,
+        SogniClient(""),
+        ApiKeyStore(tmp_path / "key.txt"),
+        wavespeed_campaign_store=campaign_store,
+        wavespeed_queue_store=queue_store,
+    )
     window.wavespeed_queue_widget.load_queue(WaveSpeedQueue())
 
     def add_reference(kind: str, path: str):
@@ -133,6 +141,9 @@ def test_add_to_queue_groups_jobs_by_frame_name(tmp_path: Path):
     assert all(Path(item.video_path).name.startswith("video-") for item in queue.items)
     assert all(Path(item.video_path).name for item in queue.items)
     assert Path(queue.frame_path).name == "frame-a.png"
+    campaigns, _active_id = campaign_store.load()
+    assert len(campaigns[0].queue.items) == 2
+    assert Path(campaigns[0].queue.frame_path).name == "frame-a.png"
 
     window.wavespeed_reference_lists["reference_images"].clear()
     add_reference("reference_images", "C:/frames/frame-b.png")
@@ -189,6 +200,70 @@ def test_wavespeed_campaign_survives_window_reopen(tmp_path: Path):
     assert second.wavespeed_campaign_name_edit.text() == "Frame azul"
     assert second.wavespeed_queue_widget.queue().frame_path.endswith("frame-a.png")
     assert second.wavespeed_queue_widget.queue().items[0].video_path.endswith("video-a.mp4")
+
+
+def test_empty_active_campaign_recovers_existing_legacy_queue(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    campaign_store = WaveSpeedCampaignStore(tmp_path / "campaigns.json")
+    queue_store = WaveSpeedQueueStore(tmp_path / "legacy-queue.json")
+    empty_campaign = WaveSpeedCampaign(name="Campaña importada")
+    campaign_store.save(empty_campaign, active=True)
+    legacy_queue = WaveSpeedQueue(
+        frame_path="C:/frames/recovered.png",
+        items=[WaveSpeedQueueItem(video_path="C:/videos/recovered.mp4", prompt="Recovered prompt")],
+    )
+    queue_store.save(legacy_queue)
+
+    window = MainWindow(
+        repo,
+        SogniClient(""),
+        ApiKeyStore(tmp_path / "key.txt"),
+        wavespeed_campaign_store=campaign_store,
+        wavespeed_queue_store=queue_store,
+    )
+
+    recovered = window.wavespeed_queue_widget.queue()
+    assert recovered.frame_path.endswith("recovered.png")
+    assert recovered.items[0].prompt == "Recovered prompt"
+    assert campaign_store.load()[0][0].queue.items[0].video_path.endswith("recovered.mp4")
+
+
+def test_new_empty_campaign_does_not_recover_stale_legacy_queue(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    campaign_store = WaveSpeedCampaignStore(tmp_path / "campaigns.json")
+    queue_store = WaveSpeedQueueStore(tmp_path / "legacy-queue.json")
+    saved_campaign = WaveSpeedCampaign(
+        name="Guardada",
+        queue=WaveSpeedQueue(
+            frame_path="C:/frames/saved.png",
+            items=[WaveSpeedQueueItem(video_path="C:/videos/saved.mp4", prompt="Saved")],
+        ),
+    )
+    campaign_store.save(saved_campaign, active=False)
+    new_campaign = WaveSpeedCampaign(name="Nueva campaña")
+    campaign_store.save(new_campaign, active=True)
+    queue_store.save(
+        WaveSpeedQueue(
+            frame_path="C:/frames/stale.png",
+            items=[WaveSpeedQueueItem(video_path="C:/videos/stale.mp4", prompt="Stale")],
+        )
+    )
+
+    window = MainWindow(
+        repo,
+        SogniClient(""),
+        ApiKeyStore(tmp_path / "key.txt"),
+        wavespeed_campaign_store=campaign_store,
+        wavespeed_queue_store=queue_store,
+    )
+
+    assert window.wavespeed_queue_widget.queue().items == []
 
 
 def test_wavespeed_queue_event_updates_row_and_retry_button(tmp_path: Path):

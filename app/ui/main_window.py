@@ -484,7 +484,7 @@ class MainWindow(QMainWindow):
             existing_videos.add(str(Path(video_path).resolve()).casefold())
             added_count += 1
         self.wavespeed_queue_widget.load_queue(queue)
-        self.wavespeed_queue_store.save(queue)
+        self._save_wavespeed_queue()
         self.wavespeed_status_label.setText(
             f"{added_count} job(s) agregado(s) a la cola del frame {Path(frame_path).name}."
         )
@@ -642,8 +642,8 @@ class MainWindow(QMainWindow):
 
     def _load_wavespeed_campaigns(self) -> None:
         campaigns, active_id = self.wavespeed_campaign_store.load()
+        legacy_queue = self.wavespeed_queue_store.load()
         if not campaigns:
-            legacy_queue = self.wavespeed_queue_store.load()
             if legacy_queue.frame_path or legacy_queue.items:
                 migrated = WaveSpeedCampaign(name="Campaña importada", queue=legacy_queue)
                 self.wavespeed_campaign_store.save(migrated, active=True)
@@ -654,6 +654,20 @@ class MainWindow(QMainWindow):
             campaigns, active_id = [first], first.campaign_id
         if active_id not in {campaign.campaign_id for campaign in campaigns}:
             active_id = campaigns[0].campaign_id
+        active_campaign = next((campaign for campaign in campaigns if campaign.campaign_id == active_id), None)
+        can_recover_legacy = active_campaign is not None and (
+            active_campaign.name == "Campaña importada"
+            or (len(campaigns) == 1 and active_campaign.name == "Nueva campaña")
+        )
+        if (
+            can_recover_legacy
+            and not active_campaign.queue.frame_path
+            and not active_campaign.queue.items
+            and (legacy_queue.frame_path or legacy_queue.items)
+        ):
+            active_campaign.queue = legacy_queue
+            self.wavespeed_campaign_store.save(active_campaign, active=True)
+            campaigns, active_id = self.wavespeed_campaign_store.load()
         self.wavespeed_queue_widget.set_campaigns(campaigns, active_id)
         self._select_wavespeed_campaign(active_id)
 
@@ -746,7 +760,7 @@ class MainWindow(QMainWindow):
         self._wavespeed_queue_cancel_event.clear()
         self._wavespeed_queue_running = True
         self.wavespeed_queue_widget.set_running(True)
-        self.wavespeed_queue_store.save(queue)
+        self._persist_wavespeed_campaign_queue(queue)
         self.wavespeed_queue_widget.set_error("Cola iniciada.")
         thread = threading.Thread(target=self._run_wavespeed_queue, args=(queue,), daemon=True)
         thread.start()
@@ -822,7 +836,7 @@ class MainWindow(QMainWindow):
         if not self._wavespeed_queue_running or self._wavespeed_queue_active is None:
             return
         self._wavespeed_queue_active.paused = True
-        self.wavespeed_queue_store.save(self._wavespeed_queue_active)
+        self._persist_wavespeed_campaign_queue(self._wavespeed_queue_active)
         self.wavespeed_queue_widget.set_error("La cola se pausará después del ítem actual.")
 
     def _retry_wavespeed_item(self, item_id: str) -> None:
@@ -832,7 +846,7 @@ class MainWindow(QMainWindow):
             return
         item.retry()
         queue.paused = False
-        self.wavespeed_queue_store.save(queue)
+        self._persist_wavespeed_campaign_queue(queue)
         self.wavespeed_queue_widget.set_item_update(item)
         if not self._wavespeed_queue_running:
             self._start_wavespeed_queue()
@@ -843,7 +857,7 @@ class MainWindow(QMainWindow):
             if item.status == QueueStatus.FAILED:
                 item.retry()
         queue.paused = False
-        self.wavespeed_queue_store.save(queue)
+        self._persist_wavespeed_campaign_queue(queue)
         for item in queue.items:
             self.wavespeed_queue_widget.set_item_update(item)
         if not self._wavespeed_queue_running:
@@ -853,7 +867,7 @@ class MainWindow(QMainWindow):
         queue = self.wavespeed_queue_widget.queue()
         queue.items = [item for item in queue.items if item.status != QueueStatus.COMPLETED]
         self.wavespeed_queue_widget.load_queue(queue)
-        self.wavespeed_queue_store.save(queue)
+        self._persist_wavespeed_campaign_queue(queue)
 
     def _wavespeed_estimate_price(self) -> None:
         snapshot = self._wavespeed_snapshot()
