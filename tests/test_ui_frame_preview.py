@@ -9,7 +9,13 @@ from app.database.repositories import CampaignRepository
 from app.sogni.auth import ApiKeyStore
 from app.sogni.client import SogniClient
 from app.ui.main_window import MainWindow
-from app.wavespeed.queue import QueueStatus, WaveSpeedQueue, WaveSpeedQueueItem, WaveSpeedQueueStore
+from app.wavespeed.queue import (
+    QueueStatus,
+    WaveSpeedCampaignStore,
+    WaveSpeedQueue,
+    WaveSpeedQueueItem,
+    WaveSpeedQueueStore,
+)
 
 
 def _app():
@@ -135,6 +141,49 @@ def test_add_to_queue_groups_jobs_by_frame_name(tmp_path: Path):
 
     assert len(window.wavespeed_queue_widget.queue().items) == 2
     assert "distinto" in window.wavespeed_status_label.text()
+
+
+def test_wavespeed_campaign_controls_are_visible(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+
+    assert window.wavespeed_campaign_combo is not None
+    assert window.wavespeed_campaign_name_edit is not None
+    assert window.wavespeed_campaign_save_button.text() == "Guardar campaña"
+    assert window.wavespeed_campaign_new_button.text() == "Nueva campaña"
+
+
+def test_wavespeed_campaign_survives_window_reopen(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    campaign_store = WaveSpeedCampaignStore(tmp_path / "campaigns.json")
+
+    first = MainWindow(
+        repo,
+        SogniClient(""),
+        ApiKeyStore(tmp_path / "key.txt"),
+        wavespeed_campaign_store=campaign_store,
+    )
+    first.wavespeed_queue_widget.set_campaign_name("Frame azul")
+    first.wavespeed_queue_widget.set_frame_path("C:/frames/frame-a.png")
+    first.wavespeed_queue_widget.add_video("C:/videos/video-a.mp4")
+    first._save_wavespeed_campaign()
+
+    second = MainWindow(
+        repo,
+        SogniClient(""),
+        ApiKeyStore(tmp_path / "key-2.txt"),
+        wavespeed_campaign_store=campaign_store,
+    )
+
+    assert second.wavespeed_campaign_name_edit.text() == "Frame azul"
+    assert second.wavespeed_queue_widget.queue().frame_path.endswith("frame-a.png")
+    assert second.wavespeed_queue_widget.queue().items[0].video_path.endswith("video-a.mp4")
 
 
 def test_wavespeed_queue_event_updates_row_and_retry_button(tmp_path: Path):

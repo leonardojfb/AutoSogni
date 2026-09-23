@@ -44,6 +44,10 @@ loaded in the references panel, `Agregar a la cola` in the
 `Estimación, salida y ejecución` panel adds the current videos with that image
 as the shared frame. Repeated additions with the same frame name append jobs to
 the same queue; a different frame name is rejected instead of mixing frames.
+Queues are saved as named WaveSpeed campaigns in
+`data/wavespeed_campaigns.json`. The campaign selector restores the last active
+campaign on startup, and the previous single-queue file is migrated
+automatically the first time this feature is opened.
 
 ## Sogni API Notes
 

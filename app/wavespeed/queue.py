@@ -113,6 +113,34 @@ class WaveSpeedQueue:
         )
 
 
+@dataclass
+class WaveSpeedCampaign:
+    campaign_id: str = field(default_factory=lambda: uuid4().hex)
+    name: str = "Nueva campaña"
+    queue: WaveSpeedQueue = field(default_factory=WaveSpeedQueue)
+    created_at: str = field(default_factory=_now)
+    updated_at: str = field(default_factory=_now)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "campaign_id": self.campaign_id,
+            "name": self.name,
+            "queue": self.queue.to_dict(),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "WaveSpeedCampaign":
+        return cls(
+            campaign_id=str(value.get("campaign_id") or uuid4().hex),
+            name=str(value.get("name") or "Nueva campaña"),
+            queue=WaveSpeedQueue.from_dict(value.get("queue") or {}),
+            created_at=str(value.get("created_at") or _now()),
+            updated_at=str(value.get("updated_at") or _now()),
+        )
+
+
 class WaveSpeedQueueStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path or data_dir() / "wavespeed_queue.json")
@@ -145,3 +173,58 @@ class WaveSpeedQueueStore:
             self.path.unlink()
         except FileNotFoundError:
             pass
+
+
+class WaveSpeedCampaignStore:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = Path(path or data_dir() / "wavespeed_campaigns.json")
+
+    def load(self) -> tuple[list[WaveSpeedCampaign], str | None]:
+        if not self.path.exists():
+            return [], None
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return [], None
+        if not isinstance(value, dict):
+            return [], None
+        campaigns = [
+            WaveSpeedCampaign.from_dict(item)
+            for item in value.get("campaigns", [])
+            if isinstance(item, dict)
+        ]
+        active_id = value.get("active_id")
+        return campaigns, str(active_id) if active_id else None
+
+    def save(self, campaign: WaveSpeedCampaign, *, active: bool = False) -> None:
+        campaigns, active_id = self.load()
+        campaign.updated_at = _now()
+        replaced = False
+        for index, existing in enumerate(campaigns):
+            if existing.campaign_id == campaign.campaign_id:
+                campaigns[index] = campaign
+                replaced = True
+                break
+        if not replaced:
+            campaigns.insert(0, campaign)
+        if active:
+            active_id = campaign.campaign_id
+        payload = {
+            "active_id": active_id,
+            "campaigns": [_redact_remote_urls(item.to_dict()) for item in campaigns],
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, self.path)
+
+    def delete(self, campaign_id: str) -> None:
+        campaigns, active_id = self.load()
+        campaigns = [item for item in campaigns if item.campaign_id != campaign_id]
+        if active_id == campaign_id:
+            active_id = campaigns[0].campaign_id if campaigns else None
+        payload = {"active_id": active_id, "campaigns": [item.to_dict() for item in campaigns]}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, self.path)

@@ -1,6 +1,13 @@
 import json
 
-from app.wavespeed.queue import QueueStatus, WaveSpeedQueue, WaveSpeedQueueItem, WaveSpeedQueueStore
+from app.wavespeed.queue import (
+    QueueStatus,
+    WaveSpeedCampaign,
+    WaveSpeedCampaignStore,
+    WaveSpeedQueue,
+    WaveSpeedQueueItem,
+    WaveSpeedQueueStore,
+)
 from app.wavespeed.schemas import WaveSpeedPrediction
 
 
@@ -47,6 +54,26 @@ def test_queue_store_round_trips_items_and_redacts_remote_values(tmp_path):
     assert restored.items[0].video_path == "C:/inputs/ref.mp4"
     assert restored.items[0].task_id == "pred-1"
     assert "https://" not in (tmp_path / "queue.json").read_text(encoding="utf-8")
+
+
+def test_campaign_store_persists_named_queue_and_active_campaign(tmp_path):
+    store = WaveSpeedCampaignStore(tmp_path / "campaigns.json")
+    campaign = WaveSpeedCampaign(
+        campaign_id="campaign-1",
+        name="Frame azul",
+        queue=WaveSpeedQueue(
+            frame_path="C:/frames/blue.png",
+            items=[WaveSpeedQueueItem(video_path="C:/videos/one.mp4", prompt="Walk")],
+        ),
+    )
+
+    store.save(campaign, active=True)
+    campaigns, active_id = store.load()
+
+    assert active_id == "campaign-1"
+    assert campaigns[0].name == "Frame azul"
+    assert campaigns[0].queue.items[0].prompt == "Walk"
+    assert "api_key" not in (tmp_path / "campaigns.json").read_text(encoding="utf-8")
 
 
 def test_retry_resets_only_remote_result_fields():

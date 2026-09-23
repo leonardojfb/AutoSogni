@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -27,6 +28,10 @@ class WaveSpeedQueueWidget(QWidget):
     retry_failed_requested = Signal()
     clear_completed_requested = Signal()
     estimate_requested = Signal()
+    campaign_selected = Signal(str)
+    new_campaign_requested = Signal()
+    save_campaign_requested = Signal()
+    delete_campaign_requested = Signal()
 
     COLUMNS = (
         "#",
@@ -54,6 +59,24 @@ class WaveSpeedQueueWidget(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+        campaign_row = QHBoxLayout()
+        campaign_row.addWidget(QLabel("Campaña"))
+        self.campaign_combo = QComboBox()
+        self.campaign_combo.currentIndexChanged.connect(self._campaign_index_changed)
+        self.campaign_name_edit = QLineEdit("Nueva campaña")
+        self.campaign_name_edit.setPlaceholderText("Nombre de la campaña")
+        self.campaign_new_button = QPushButton("Nueva campaña")
+        self.campaign_new_button.clicked.connect(self.new_campaign_requested.emit)
+        self.campaign_save_button = QPushButton("Guardar campaña")
+        self.campaign_save_button.clicked.connect(self.save_campaign_requested.emit)
+        self.campaign_delete_button = QPushButton("Eliminar campaña")
+        self.campaign_delete_button.clicked.connect(self.delete_campaign_requested.emit)
+        campaign_row.addWidget(self.campaign_combo, 1)
+        campaign_row.addWidget(self.campaign_name_edit, 1)
+        campaign_row.addWidget(self.campaign_new_button)
+        campaign_row.addWidget(self.campaign_save_button)
+        campaign_row.addWidget(self.campaign_delete_button)
+        layout.addLayout(campaign_row)
         layout.addWidget(QLabel("Cola secuencial WaveSpeed · un frame compartido, un video por fila"))
 
         frame_row = QHBoxLayout()
@@ -290,6 +313,31 @@ class WaveSpeedQueueWidget(QWidget):
 
     def set_error(self, message: str) -> None:
         self.status_label.setText(f"Error: {message}")
+
+    def _campaign_index_changed(self, index: int) -> None:
+        if index >= 0:
+            self.campaign_selected.emit(str(self.campaign_combo.itemData(index) or ""))
+
+    def set_campaigns(self, campaigns, active_id: str | None = None) -> None:
+        self.campaign_combo.blockSignals(True)
+        self.campaign_combo.clear()
+        selected_index = -1
+        for index, campaign in enumerate(campaigns):
+            self.campaign_combo.addItem(campaign.name, campaign.campaign_id)
+            if campaign.campaign_id == active_id:
+                selected_index = index
+        if selected_index >= 0:
+            self.campaign_combo.setCurrentIndex(selected_index)
+        self.campaign_combo.blockSignals(False)
+
+    def selected_campaign_id(self) -> str:
+        return str(self.campaign_combo.currentData() or "")
+
+    def set_campaign_name(self, name: str) -> None:
+        self.campaign_name_edit.setText(name)
+
+    def campaign_name(self) -> str:
+        return self.campaign_name_edit.text().strip() or "Nueva campaña"
 
     def set_estimating(self, estimating: bool) -> None:
         self.estimate_button.setEnabled(not estimating)

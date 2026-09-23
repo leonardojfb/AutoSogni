@@ -15,7 +15,13 @@ from app.sogni.auth import ApiKeyStore
 from app.utils.paths import data_dir
 from app.wavespeed.client import WaveSpeedClient
 from app.wavespeed.history import WaveSpeedHistoryStore
-from app.wavespeed.queue import QueueStatus, WaveSpeedQueueItem, WaveSpeedQueueStore
+from app.wavespeed.queue import (
+    QueueStatus,
+    WaveSpeedCampaign,
+    WaveSpeedCampaignStore,
+    WaveSpeedQueueItem,
+    WaveSpeedQueueStore,
+)
 from app.wavespeed.queue_runner import WaveSpeedQueueRunner
 from app.ui.wavespeed_queue import WaveSpeedQueueWidget
 from app.wavespeed.validation import (
@@ -62,7 +68,16 @@ except ImportError:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, repo: CampaignRepository, sogni_client, key_store, wavespeed_client=None, wavespeed_key_store=None) -> None:
+    def __init__(
+        self,
+        repo: CampaignRepository,
+        sogni_client,
+        key_store,
+        wavespeed_client=None,
+        wavespeed_key_store=None,
+        wavespeed_campaign_store=None,
+        wavespeed_queue_store=None,
+    ) -> None:
         super().__init__()
         self.repo = repo
         self.sogni = sogni_client
@@ -70,7 +85,10 @@ class MainWindow(QMainWindow):
         self.wavespeed_key_store = wavespeed_key_store or ApiKeyStore(data_dir() / "wavespeed_api_key.txt")
         self.wavespeed = wavespeed_client or WaveSpeedClient(self.wavespeed_key_store.get())
         self.wavespeed_history = WaveSpeedHistoryStore()
-        self.wavespeed_queue_store = WaveSpeedQueueStore()
+        self.wavespeed_queue_store = wavespeed_queue_store or WaveSpeedQueueStore()
+        self.wavespeed_campaign_store = wavespeed_campaign_store or WaveSpeedCampaignStore()
+        self._wavespeed_campaign_id: str | None = None
+        self._wavespeed_campaign_name = "Nueva campaña"
         self._wavespeed_queue_cancel_event = threading.Event()
         self._wavespeed_queue_running = False
         self._wavespeed_queue_active = None
@@ -377,8 +395,16 @@ class MainWindow(QMainWindow):
         self.wavespeed_queue_widget.retry_failed_requested.connect(self._retry_wavespeed_failed)
         self.wavespeed_queue_widget.clear_completed_requested.connect(self._clear_wavespeed_completed)
         self.wavespeed_queue_widget.estimate_requested.connect(self._estimate_wavespeed_queue_prices)
+        self.wavespeed_queue_widget.campaign_selected.connect(self._select_wavespeed_campaign)
+        self.wavespeed_queue_widget.new_campaign_requested.connect(self._new_wavespeed_campaign)
+        self.wavespeed_queue_widget.save_campaign_requested.connect(self._save_wavespeed_campaign)
+        self.wavespeed_queue_widget.delete_campaign_requested.connect(self._delete_wavespeed_campaign)
         self.wavespeed_queue_widget.queue_changed.connect(self._save_wavespeed_queue)
-        self.wavespeed_queue_widget.load_queue(self.wavespeed_queue_store.load())
+        self.wavespeed_campaign_combo = self.wavespeed_queue_widget.campaign_combo
+        self.wavespeed_campaign_name_edit = self.wavespeed_queue_widget.campaign_name_edit
+        self.wavespeed_campaign_save_button = self.wavespeed_queue_widget.campaign_save_button
+        self.wavespeed_campaign_new_button = self.wavespeed_queue_widget.campaign_new_button
+        self._load_wavespeed_campaigns()
         layout.addWidget(self.wavespeed_queue_widget)
 
         self.wavespeed_history_table = QTableWidget(0, 5)
@@ -612,10 +638,84 @@ class MainWindow(QMainWindow):
 
         self._run_wavespeed_worker(task, "balance")
 
+    def _load_wavespeed_campaigns(self) -> None:
+        campaigns, active_id = self.wavespeed_campaign_store.load()
+        if not campaigns:
+            legacy_queue = self.wavespeed_queue_store.load()
+            if legacy_queue.frame_path or legacy_queue.items:
+                migrated = WaveSpeedCampaign(name="Campaña importada", queue=legacy_queue)
+                self.wavespeed_campaign_store.save(migrated, active=True)
+                campaigns, active_id = [migrated], migrated.campaign_id
+        if not campaigns:
+            first = WaveSpeedCampaign()
+            self.wavespeed_campaign_store.save(first, active=True)
+            campaigns, active_id = [first], first.campaign_id
+        if active_id not in {campaign.campaign_id for campaign in campaigns}:
+            active_id = campaigns[0].campaign_id
+        self.wavespeed_queue_widget.set_campaigns(campaigns, active_id)
+        self._select_wavespeed_campaign(active_id)
+
+    def _select_wavespeed_campaign(self, campaign_id: str) -> None:
+        if not campaign_id or self._wavespeed_queue_running:
+            return
+        if self._wavespeed_campaign_id:
+            self._save_wavespeed_queue()
+        campaigns, _active_id = self.wavespeed_campaign_store.load()
+        campaign = next((item for item in campaigns if item.campaign_id == campaign_id), None)
+        if campaign is None:
+            return
+        self._wavespeed_campaign_id = campaign.campaign_id
+        self._wavespeed_campaign_name = campaign.name
+        self.wavespeed_queue_widget.set_campaign_name(campaign.name)
+        self.wavespeed_queue_widget.load_queue(campaign.queue)
+
+    def _save_wavespeed_campaign(self) -> None:
+        if self._wavespeed_queue_running:
+            return
+        self._save_wavespeed_queue()
+        self.wavespeed_queue_widget.set_error(f"Campaña guardada: {self._wavespeed_campaign_name}.")
+
+    def _new_wavespeed_campaign(self) -> None:
+        if self._wavespeed_queue_running:
+            return
+        self._save_wavespeed_queue()
+        campaign = WaveSpeedCampaign()
+        self.wavespeed_campaign_store.save(campaign, active=True)
+        self._load_wavespeed_campaigns()
+
+    def _delete_wavespeed_campaign(self) -> None:
+        if self._wavespeed_queue_running or not self._wavespeed_campaign_id:
+            return
+        self.wavespeed_campaign_store.delete(self._wavespeed_campaign_id)
+        self._wavespeed_campaign_id = None
+        self._load_wavespeed_campaigns()
+
     def _save_wavespeed_queue(self) -> None:
         if not hasattr(self, "wavespeed_queue_widget"):
             return
-        self.wavespeed_queue_store.save(self.wavespeed_queue_widget.queue())
+        queue = self.wavespeed_queue_widget.queue()
+        name = self.wavespeed_queue_widget.campaign_name()
+        if self._wavespeed_campaign_id:
+            campaign = WaveSpeedCampaign(
+                campaign_id=self._wavespeed_campaign_id,
+                name=name,
+                queue=queue,
+            )
+        else:
+            campaign = WaveSpeedCampaign(name=name, queue=queue)
+        self.wavespeed_campaign_store.save(campaign, active=True)
+        self._wavespeed_campaign_id = campaign.campaign_id
+        self._wavespeed_campaign_name = campaign.name
+
+    def _persist_wavespeed_campaign_queue(self, queue) -> None:
+        if not self._wavespeed_campaign_id:
+            return
+        campaign = WaveSpeedCampaign(
+            campaign_id=self._wavespeed_campaign_id,
+            name=self._wavespeed_campaign_name,
+            queue=queue,
+        )
+        self.wavespeed_campaign_store.save(campaign, active=True)
 
     def _validate_wavespeed_queue(self, queue) -> None:
         if not queue.frame_path:
@@ -672,7 +772,7 @@ class MainWindow(QMainWindow):
                 on_update=lambda item: self._wavespeed_queue_item_update(queue, item),
             )
             total = runner.estimate_prices(queue)
-            self.wavespeed_queue_store.save(queue)
+            self._persist_wavespeed_campaign_queue(queue)
             return total
 
         self._run_wavespeed_worker(task, "queue_prices")
@@ -694,11 +794,11 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             error = exc
         finally:
-            self.wavespeed_queue_store.save(queue)
+            self._persist_wavespeed_campaign_queue(queue)
             self._post_wavespeed_event("queue_finished", error)
 
     def _wavespeed_queue_item_update(self, queue, item: WaveSpeedQueueItem) -> None:
-        self.wavespeed_queue_store.save(queue)
+        self._persist_wavespeed_campaign_queue(queue)
         self._post_wavespeed_event("queue_item", item)
 
     def _wavespeed_upload_cached(self, path: Path) -> dict:

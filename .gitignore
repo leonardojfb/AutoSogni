@@ -6,6 +6,7 @@ data/sogni_api_key.txt
 data/wavespeed_api_key.txt
 data/wavespeed_history.json
 data/wavespeed_queue.json
+data/wavespeed_campaigns.json
 
 # Generated application output
 build/
