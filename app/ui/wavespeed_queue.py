@@ -26,6 +26,7 @@ class WaveSpeedQueueWidget(QWidget):
     retry_requested = Signal(str)
     retry_failed_requested = Signal()
     clear_completed_requested = Signal()
+    estimate_requested = Signal()
 
     COLUMNS = (
         "#",
@@ -101,6 +102,10 @@ class WaveSpeedQueueWidget(QWidget):
         retry_failed.clicked.connect(self.retry_failed_requested.emit)
         clear_completed = QPushButton("Limpiar completados")
         clear_completed.clicked.connect(self.clear_completed_requested.emit)
+        estimate = QPushButton("Estimar costos")
+        estimate.clicked.connect(self.estimate_requested.emit)
+        self.estimate_button = estimate
+        self.total_price_label = QLabel("Total estimado: no calculado")
         self.start_button = start
         self.pause_button = pause
         controls.addWidget(add_video)
@@ -109,6 +114,8 @@ class WaveSpeedQueueWidget(QWidget):
         controls.addWidget(pause)
         controls.addWidget(retry_failed)
         controls.addWidget(clear_completed)
+        controls.addWidget(estimate)
+        controls.addWidget(self.total_price_label)
         layout.addLayout(controls)
 
         self.status_label = QLabel("Cola vacía.")
@@ -142,6 +149,14 @@ class WaveSpeedQueueWidget(QWidget):
         self._update_status()
         self.queue_changed.emit()
         return item
+
+    def add_video(self, video_path: str) -> WaveSpeedQueueItem:
+        return self.add_item_for_test(video_path)
+
+    def set_frame_path(self, frame_path: str) -> None:
+        self._queue.frame_path = frame_path
+        self.frame_edit.setText(frame_path)
+        self.queue_changed.emit()
 
     def _text_item(self, value: object, *, editable: bool = False) -> QTableWidgetItem:
         item = QTableWidgetItem(str(value))
@@ -275,3 +290,16 @@ class WaveSpeedQueueWidget(QWidget):
 
     def set_error(self, message: str) -> None:
         self.status_label.setText(f"Error: {message}")
+
+    def set_estimating(self, estimating: bool) -> None:
+        self.estimate_button.setEnabled(not estimating)
+        if estimating:
+            self.total_price_label.setText("Total estimado: calculando...")
+
+    def set_total_price(self, total: float | None, error: str = "") -> None:
+        if error:
+            self.total_price_label.setText(f"Total estimado: error: {error}")
+        elif total is None:
+            self.total_price_label.setText("Total estimado: no calculado")
+        else:
+            self.total_price_label.setText(f"Total estimado: ${total:.4f} USD")

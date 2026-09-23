@@ -119,6 +119,42 @@ class WaveSpeedQueueRunner:
 
         return queue
 
+    def estimate_prices(self, queue: WaveSpeedQueue) -> float:
+        frame_url: str | None = None
+        uploaded_videos: dict[str, str] = {}
+        total = 0.0
+        for item in queue.items:
+            try:
+                if frame_url is None:
+                    frame_url = self.upload_file(Path(queue.frame_path))["download_url"]
+                video_key = str(Path(item.video_path).resolve())
+                video_url = uploaded_videos.get(video_key)
+                if video_url is None:
+                    video_url = self.upload_file(Path(item.video_path))["download_url"]
+                    uploaded_videos[video_key] = video_url
+                payload = build_reference_video_payload(
+                    prompt=item.prompt,
+                    reference_images=[frame_url],
+                    reference_videos=[video_url],
+                    resolution=item.resolution,
+                    aspect_ratio=item.aspect_ratio,
+                    duration=item.duration,
+                    enable_prompt_expansion=item.enable_prompt_expansion,
+                    enable_audio=item.enable_audio,
+                    seed=item.seed,
+                    enable_sync_mode=False,
+                    enable_base64_output=False,
+                )
+                item.price = self._price(self.client.estimate_price(payload))
+                item.error = ""
+                if item.price is not None:
+                    total += item.price
+            except Exception as exc:
+                item.price = None
+                item.error = f"No se pudo estimar: {exc}"
+            self._notify(item)
+        return round(total, 8)
+
     def _notify_status(self, item: WaveSpeedQueueItem, prediction) -> None:
         item.task_id = prediction.id
         if prediction.error:

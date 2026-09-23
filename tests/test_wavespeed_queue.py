@@ -198,3 +198,32 @@ def test_runner_recovers_existing_task_without_duplicate_submission(tmp_path):
     assert ("get", "pred-existing") in events
     assert not any(event[0] == "submit" for event in events)
     assert result.items[0].status == QueueStatus.COMPLETED
+
+
+def test_runner_estimates_each_row_and_returns_known_total(tmp_path):
+    events = []
+    client = FakeWaveSpeedClient(
+        events,
+        results={},
+    )
+    queue = WaveSpeedQueue(
+        frame_path="frame.png",
+        output_dir=str(tmp_path),
+        items=[
+            WaveSpeedQueueItem(item_id="1", video_path="one.mp4", prompt="One"),
+            WaveSpeedQueueItem(item_id="2", video_path="two.mp4", prompt="Two"),
+        ],
+    )
+
+    from app.wavespeed.queue_runner import WaveSpeedQueueRunner
+
+    total = WaveSpeedQueueRunner(
+        client,
+        upload_file=lambda path: {"download_url": f"https://cdn/{path}"},
+        save_output=lambda *_args: "",
+        sleep=lambda _seconds: None,
+    ).estimate_prices(queue)
+
+    assert total == 1.0
+    assert [item.price for item in queue.items] == [0.5, 0.5]
+    assert not any(event[0] == "submit" for event in events)

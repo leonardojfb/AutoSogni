@@ -83,6 +83,22 @@ def test_wavespeed_queue_panel_adds_rows_and_exposes_retry(tmp_path: Path):
     assert item.video_path == "video.mp4"
     assert item.status == QueueStatus.PENDING
     assert window.wavespeed_queue_widget.has_retry_control(item.item_id)
+    assert window.wavespeed_queue_widget.total_price_label.text() == "Total estimado: no calculado"
+    assert window.wavespeed_queue_widget.estimate_button.text() == "Estimar costos"
+
+
+def test_wavespeed_image_panel_exposes_add_to_queue_action(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+
+    assert any(
+        button.text() == "Agregar a la cola"
+        for button in window.findChildren(__import__("PySide6.QtWidgets", fromlist=["QPushButton"]).QPushButton)
+    )
 
 
 def test_wavespeed_queue_event_updates_row_and_retry_button(tmp_path: Path):

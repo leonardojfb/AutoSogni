@@ -38,7 +38,10 @@ next row. Failed rows are marked `Fallido`, do not stop later rows, and expose a
 `Reintentar` action. The queue is stored locally in
 `data/wavespeed_queue.json`; API keys and temporary upload URLs are never
 stored there. Queue runs use asynchronous task polling, so webhook, sync mode,
-and Base64 output are disabled for that workflow.
+and Base64 output are disabled for that workflow. Use `Estimar costos` to see
+the price of every row and the total before submitting. When an image is
+selected in the references panel, `Agregar a la cola` opens a video picker and
+adds those videos with the selected image as the shared frame.
 
 ## Sogni API Notes
 

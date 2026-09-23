@@ -271,6 +271,10 @@ class MainWindow(QMainWindow):
             remove.clicked.connect(lambda _checked=False, k=kind: self._wavespeed_remove_files(k))
             buttons.addWidget(add)
             buttons.addWidget(remove)
+            if kind == "reference_images":
+                add_to_queue = QPushButton("Agregar a la cola")
+                add_to_queue.clicked.connect(self._wavespeed_add_video_to_queue_from_image)
+                buttons.addWidget(add_to_queue)
             box_layout.addLayout(buttons)
             references_layout.addWidget(box, 0, column)
         layout.addWidget(references)
@@ -368,6 +372,7 @@ class MainWindow(QMainWindow):
         self.wavespeed_queue_widget.retry_requested.connect(self._retry_wavespeed_item)
         self.wavespeed_queue_widget.retry_failed_requested.connect(self._retry_wavespeed_failed)
         self.wavespeed_queue_widget.clear_completed_requested.connect(self._clear_wavespeed_completed)
+        self.wavespeed_queue_widget.estimate_requested.connect(self._estimate_wavespeed_queue_prices)
         self.wavespeed_queue_widget.queue_changed.connect(self._save_wavespeed_queue)
         self.wavespeed_queue_widget.load_queue(self.wavespeed_queue_store.load())
         layout.addWidget(self.wavespeed_queue_widget)
@@ -399,6 +404,26 @@ class MainWindow(QMainWindow):
             widget.addItem(item)
             existing.add(path)
         self.wavespeed_status_label.setText(f"{widget.count()}/{limits[kind]} referencias en {kind}.")
+
+    def _wavespeed_add_video_to_queue_from_image(self) -> None:
+        selected_images = self.wavespeed_reference_lists["reference_images"].selectedItems()
+        if len(selected_images) != 1:
+            self.wavespeed_status_label.setText("Seleccioná exactamente un frame para la cola.")
+            return
+        frame_path = str(selected_images[0].data(Qt.UserRole))
+        selected_videos, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Agregar videos a la cola",
+            filter="Videos (*.mp4 *.mov)",
+        )
+        if not selected_videos:
+            return
+        self.wavespeed_queue_widget.set_frame_path(frame_path)
+        for selected_path in selected_videos:
+            self.wavespeed_queue_widget.add_video(str(Path(selected_path).resolve()))
+        self.wavespeed_queue_widget.set_error(
+            f"{len(selected_videos)} video(s) agregado(s) con el frame seleccionado."
+        )
 
     def _wavespeed_remove_files(self, kind: str) -> None:
         widget = self.wavespeed_reference_lists[kind]
@@ -556,21 +581,23 @@ class MainWindow(QMainWindow):
             return
         self.wavespeed_queue_store.save(self.wavespeed_queue_widget.queue())
 
+    def _validate_wavespeed_queue(self, queue) -> None:
+        if not queue.frame_path:
+            raise ValueError("Seleccioná un frame compartido.")
+        validate_local_reference_file(Path(queue.frame_path), "reference_images")
+        if not queue.items:
+            raise ValueError("Agregá al menos un video a la cola.")
+        for item in queue.items:
+            validate_local_reference_file(Path(item.video_path), "reference_videos")
+            if not item.prompt.strip():
+                raise ValueError(f"El ítem {item.item_id} no tiene prompt.")
+
     def _start_wavespeed_queue(self) -> None:
         if self._wavespeed_queue_running:
             return
         queue = self.wavespeed_queue_widget.queue()
-        if not queue.frame_path:
-            self.wavespeed_queue_widget.set_error("Seleccioná un frame compartido.")
-            return
         try:
-            validate_local_reference_file(Path(queue.frame_path), "reference_images")
-            if not queue.items:
-                raise ValueError("Agregá al menos un video a la cola.")
-            for item in queue.items:
-                validate_local_reference_file(Path(item.video_path), "reference_videos")
-                if not item.prompt.strip():
-                    raise ValueError(f"El ítem {item.item_id} no tiene prompt.")
+            self._validate_wavespeed_queue(queue)
         except Exception as exc:
             self.wavespeed_queue_widget.set_error(str(exc))
             return
@@ -585,10 +612,36 @@ class MainWindow(QMainWindow):
         thread = threading.Thread(target=self._run_wavespeed_queue, args=(queue,), daemon=True)
         thread.start()
 
+    def _estimate_wavespeed_queue_prices(self) -> None:
+        if self._wavespeed_queue_running:
+            return
+        queue = self.wavespeed_queue_widget.queue()
+        try:
+            self._validate_wavespeed_queue(queue)
+        except Exception as exc:
+            self.wavespeed_queue_widget.set_total_price(None, str(exc))
+            return
+
+        self.wavespeed_queue_widget.set_estimating(True)
+        self.wavespeed_queue_widget.set_error("Estimando costos...")
+
+        def task():
+            runner = WaveSpeedQueueRunner(
+                self.wavespeed,
+                upload_file=self._wavespeed_upload_cached,
+                save_output=lambda *_args: "",
+                on_update=lambda item: self._wavespeed_queue_item_update(queue, item),
+            )
+            total = runner.estimate_prices(queue)
+            self.wavespeed_queue_store.save(queue)
+            return total
+
+        self._run_wavespeed_worker(task, "queue_prices")
+
     def _run_wavespeed_queue(self, queue) -> None:
         runner = WaveSpeedQueueRunner(
             self.wavespeed,
-            upload_file=self.wavespeed.upload_file,
+            upload_file=self._wavespeed_upload_cached,
             save_output=lambda output, output_dir, task_id: self._wavespeed_save_output(
                 output,
                 {"output_dir": output_dir},
@@ -608,6 +661,16 @@ class MainWindow(QMainWindow):
     def _wavespeed_queue_item_update(self, queue, item: WaveSpeedQueueItem) -> None:
         self.wavespeed_queue_store.save(queue)
         self._post_wavespeed_event("queue_item", item)
+
+    def _wavespeed_upload_cached(self, path: Path) -> dict:
+        cache_key = str(Path(path).resolve())
+        cached = self._wavespeed_uploaded.get(cache_key)
+        if cached:
+            return cached
+        self._post_wavespeed_event("status", f"Subiendo {Path(path).name}...")
+        media = self.wavespeed.upload_file(Path(path))
+        self._wavespeed_uploaded[cache_key] = media
+        return media
 
     def _pause_wavespeed_queue(self) -> None:
         if not self._wavespeed_queue_running or self._wavespeed_queue_active is None:
@@ -972,6 +1035,14 @@ class MainWindow(QMainWindow):
                 self.wavespeed_status_label.setText(f"Tareas eliminadas: {payload}")
         elif kind == "queue_item":
             self.wavespeed_queue_widget.set_item_update(payload)
+        elif kind == "queue_prices":
+            self.wavespeed_queue_widget.set_estimating(False)
+            if isinstance(payload, Exception):
+                self.wavespeed_queue_widget.set_total_price(None, str(payload))
+                self.wavespeed_queue_widget.set_error(str(payload))
+            else:
+                self.wavespeed_queue_widget.set_total_price(float(payload))
+                self.wavespeed_queue_widget.set_error("Costos estimados.")
         elif kind == "queue_finished":
             self._wavespeed_queue_running = False
             self._wavespeed_queue_active = None
