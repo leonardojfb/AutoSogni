@@ -53,3 +53,5 @@ def test_clicking_frame_row_loads_thumbnail_preview(tmp_path: Path):
     assert window.frame_preview_label.pixmap() is not None
     assert "frame.png" in window.frame_preview_meta.text()
     assert "Blue Test" in window.frame_preview_meta.text()
+    assert "WaveSpeed" in [window.tabs.tabText(index) for index in range(window.tabs.count())]
+    assert window.wavespeed.MODEL_ID == "alibaba/wan-3.0/reference-to-video"

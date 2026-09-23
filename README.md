@@ -1,6 +1,6 @@
 # Sogni Video Automator
 
-Local Windows desktop app for persistent Frame x Prompt image-to-video campaigns through the Sogni API.
+Local Windows desktop app for persistent Frame x Prompt image-to-video campaigns through the Sogni API, plus a standalone WaveSpeedAI Wan 3.0 reference-to-video tab.
 
 ## Run
 
@@ -21,6 +21,14 @@ Set `SOGNI_API_KEY` or save it in the Settings tab. The app stores local state i
 6. Choose the video format/aspect ratio, such as `9:16`, `16:9`, `1:1`, or `4:5`.
 7. Start/resume the queue. Default concurrency is 1.
 8. Soft pause sets the campaign to `PAUSE_REQUESTED`; the active job is allowed to finish.
+
+## WaveSpeedAI tab
+
+The `WaveSpeed` tab directly integrates `alibaba/wan-3.0/reference-to-video`.
+It supports local image/video/audio uploads, all documented model parameters,
+advanced sync/Base64/webhook controls, price and balance checks, async polling,
+output download, task inspection/deletion, and a sanitized local history. It is
+intentionally independent from the Sogni campaign queue.
 
 ## Sogni API Notes
 
