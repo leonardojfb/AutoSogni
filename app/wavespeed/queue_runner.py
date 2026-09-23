@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,7 +37,9 @@ class WaveSpeedQueueRunner:
         except (TypeError, ValueError):
             return None
 
-    def run(self, queue: WaveSpeedQueue, cancel_event=None) -> WaveSpeedQueue:
+    def run(self, queue: WaveSpeedQueue, cancel_event=None, *, parallel: bool = False) -> WaveSpeedQueue:
+        if parallel:
+            return self._run_parallel(queue, cancel_event)
         frame_url: str | None = None
         uploaded_videos: dict[str, str] = {}
 
@@ -117,6 +120,106 @@ class WaveSpeedQueueRunner:
                 item.error = str(exc)
                 self._notify(item)
 
+        return queue
+
+    def _run_parallel(self, queue: WaveSpeedQueue, cancel_event=None) -> WaveSpeedQueue:
+        if queue.paused or (cancel_event is not None and cancel_event.is_set()):
+            return queue
+        frame_url: str | None = None
+        uploaded_videos: dict[str, str] = {}
+        prepared: list[tuple[WaveSpeedQueueItem, dict[str, Any]]] = []
+
+        for item in queue.items:
+            if item.status not in {QueueStatus.PENDING, QueueStatus.PAUSED}:
+                continue
+            try:
+                item.status = QueueStatus.RUNNING
+                item.error = ""
+                self._notify(item)
+                if frame_url is None:
+                    frame_url = self.upload_file(Path(queue.frame_path))["download_url"]
+                video_key = str(Path(item.video_path).resolve())
+                video_url = uploaded_videos.get(video_key)
+                if video_url is None:
+                    video_url = self.upload_file(Path(item.video_path))["download_url"]
+                    uploaded_videos[video_key] = video_url
+                payload = build_reference_video_payload(
+                    prompt=item.prompt,
+                    reference_images=[frame_url],
+                    reference_videos=[video_url],
+                    resolution=item.resolution,
+                    aspect_ratio=item.aspect_ratio,
+                    duration=item.duration,
+                    enable_prompt_expansion=item.enable_prompt_expansion,
+                    enable_audio=item.enable_audio,
+                    seed=item.seed,
+                    enable_sync_mode=False,
+                    enable_base64_output=False,
+                )
+                try:
+                    item.price = self._price(self.client.estimate_price(payload))
+                except Exception:
+                    item.price = None
+                self._notify(item)
+                prepared.append((item, payload))
+            except Exception as exc:
+                item.status = QueueStatus.FAILED
+                item.error = str(exc)
+                self._notify(item)
+
+        def submit(entry):
+            item, payload = entry
+            if item.task_id:
+                prediction = self.client.get_result(item.task_id)
+            else:
+                prediction = self.client.submit(payload)
+                item.task_id = prediction.id
+            self._notify(item)
+            return item, prediction
+
+        submitted: list[tuple[WaveSpeedQueueItem, Any]] = []
+        with ThreadPoolExecutor(max_workers=max(1, len(prepared))) as executor:
+            futures = [executor.submit(submit, entry) for entry in prepared]
+            for future in as_completed(futures):
+                try:
+                    submitted.append(future.result())
+                except Exception as exc:
+                    item = prepared[futures.index(future)][0]
+                    item.status = QueueStatus.FAILED
+                    item.error = str(exc)
+                    self._notify(item)
+
+        def finish(entry):
+            item, prediction = entry
+            if prediction.status in TERMINAL_STATUSES:
+                result = prediction
+            else:
+                result = self.client.poll_result(
+                    prediction.id,
+                    sleep=self.sleep,
+                    on_update=lambda update: self._notify_status(item, update),
+                    cancel_event=cancel_event,
+                )
+            if result.status == "completed":
+                if result.outputs:
+                    item.output_file = self.save_output(result.outputs[0], queue.output_dir, result.id)
+                item.status = QueueStatus.COMPLETED
+                item.error = ""
+            else:
+                item.status = QueueStatus.FAILED
+                item.error = result.error or f"WaveSpeed task ended with status: {result.status}"
+            self._notify(item)
+
+        with ThreadPoolExecutor(max_workers=max(1, len(submitted))) as executor:
+            futures = [executor.submit(finish, entry) for entry in submitted]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as exc:
+                    item = submitted[futures.index(future)][0]
+                    item.status = QueueStatus.PAUSED if cancel_event is not None and cancel_event.is_set() else QueueStatus.FAILED
+                    item.error = str(exc)
+                    self._notify(item)
         return queue
 
     def estimate_prices(self, queue: WaveSpeedQueue) -> float:

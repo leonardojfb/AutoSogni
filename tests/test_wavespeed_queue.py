@@ -32,6 +32,7 @@ class FakeWaveSpeedClient:
         return self.results[task_id]
 
     def poll_result(self, task_id, *, sleep=None, on_update=None, cancel_event=None):
+        self.events.append(("poll", task_id))
         result = self.results[task_id]
         if on_update:
             on_update(result)
@@ -54,6 +55,15 @@ def test_queue_store_round_trips_items_and_redacts_remote_values(tmp_path):
     assert restored.items[0].video_path == "C:/inputs/ref.mp4"
     assert restored.items[0].task_id == "pred-1"
     assert "https://" not in (tmp_path / "queue.json").read_text(encoding="utf-8")
+
+
+def test_queue_store_persists_parallel_execution_mode(tmp_path):
+    store = WaveSpeedQueueStore(tmp_path / "queue.json")
+    queue = WaveSpeedQueue(execution_mode="parallel")
+
+    store.save(queue)
+
+    assert store.load().execution_mode == "parallel"
 
 
 def test_campaign_store_persists_named_queue_and_active_campaign(tmp_path):
@@ -254,3 +264,38 @@ def test_runner_estimates_each_row_and_returns_known_total(tmp_path):
     assert total == 1.0
     assert [item.price for item in queue.items] == [0.5, 0.5]
     assert not any(event[0] == "submit" for event in events)
+
+
+def test_runner_parallel_submits_all_jobs_before_polling(tmp_path):
+    events = []
+    client = FakeWaveSpeedClient(
+        events,
+        results={
+            "pred-1": WaveSpeedPrediction("pred-1", "completed", outputs=["url-1"]),
+            "pred-2": WaveSpeedPrediction("pred-2", "completed", outputs=["url-2"]),
+        },
+    )
+    queue = WaveSpeedQueue(
+        frame_path="frame.png",
+        execution_mode="parallel",
+        output_dir=str(tmp_path),
+        items=[
+            WaveSpeedQueueItem(item_id="1", video_path="one.mp4", prompt="One"),
+            WaveSpeedQueueItem(item_id="2", video_path="two.mp4", prompt="Two"),
+        ],
+    )
+
+    from app.wavespeed.queue_runner import WaveSpeedQueueRunner
+
+    WaveSpeedQueueRunner(
+        client,
+        upload_file=lambda path: {"download_url": f"https://cdn/{path}"},
+        save_output=lambda output, output_dir, task_id: str(tmp_path / f"{task_id}.mp4"),
+        sleep=lambda _seconds: None,
+    ).run(queue, parallel=True)
+
+    submit_indexes = [index for index, event in enumerate(events) if event[0] == "submit"]
+    poll_indexes = [index for index, event in enumerate(events) if event[0] == "poll"]
+    assert len(submit_indexes) == 2
+    assert len(poll_indexes) == 2
+    assert max(submit_indexes) < min(poll_indexes)

@@ -71,8 +71,14 @@ class WaveSpeedQueueWidget(QWidget):
         self.campaign_save_button.clicked.connect(self.save_campaign_requested.emit)
         self.campaign_delete_button = QPushButton("Eliminar campaña")
         self.campaign_delete_button.clicked.connect(self.delete_campaign_requested.emit)
+        campaign_row.addWidget(QLabel("Modo"))
+        self.execution_mode_combo = QComboBox()
+        self.execution_mode_combo.addItem("Secuencial", "sequential")
+        self.execution_mode_combo.addItem("Paralelo", "parallel")
+        self.execution_mode_combo.currentIndexChanged.connect(lambda _index: self.queue_changed.emit())
         campaign_row.addWidget(self.campaign_combo, 1)
         campaign_row.addWidget(self.campaign_name_edit, 1)
+        campaign_row.addWidget(self.execution_mode_combo)
         campaign_row.addWidget(self.campaign_new_button)
         campaign_row.addWidget(self.campaign_save_button)
         campaign_row.addWidget(self.campaign_delete_button)
@@ -274,6 +280,10 @@ class WaveSpeedQueueWidget(QWidget):
         self._queue = queue
         self.frame_edit.setText(queue.frame_path)
         self.output_edit.setText(queue.output_dir)
+        self.execution_mode_combo.blockSignals(True)
+        mode_index = self.execution_mode_combo.findData(queue.execution_mode)
+        self.execution_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
+        self.execution_mode_combo.blockSignals(False)
         self.table.setRowCount(0)
         self._retry_buttons.clear()
         for item in queue.items:
@@ -285,6 +295,7 @@ class WaveSpeedQueueWidget(QWidget):
             self._sync_item(row)
         self._queue.frame_path = self.frame_edit.text().strip()
         self._queue.output_dir = self.output_edit.text().strip()
+        self._queue.execution_mode = str(self.execution_mode_combo.currentData() or "sequential")
         return self._queue
 
     def set_running(self, running: bool) -> None:

@@ -89,6 +89,7 @@ class MainWindow(QMainWindow):
         self.wavespeed_campaign_store = wavespeed_campaign_store or WaveSpeedCampaignStore()
         self._wavespeed_campaign_id: str | None = None
         self._wavespeed_campaign_name = "Nueva campaña"
+        self._wavespeed_campaign_persist_lock = threading.Lock()
         self._wavespeed_queue_cancel_event = threading.Event()
         self._wavespeed_queue_running = False
         self._wavespeed_queue_active = None
@@ -404,6 +405,7 @@ class MainWindow(QMainWindow):
         self.wavespeed_campaign_name_edit = self.wavespeed_queue_widget.campaign_name_edit
         self.wavespeed_campaign_save_button = self.wavespeed_queue_widget.campaign_save_button
         self.wavespeed_campaign_new_button = self.wavespeed_queue_widget.campaign_new_button
+        self.wavespeed_execution_mode_combo = self.wavespeed_queue_widget.execution_mode_combo
         self._load_wavespeed_campaigns()
         layout.addWidget(self.wavespeed_queue_widget)
 
@@ -710,12 +712,13 @@ class MainWindow(QMainWindow):
     def _persist_wavespeed_campaign_queue(self, queue) -> None:
         if not self._wavespeed_campaign_id:
             return
-        campaign = WaveSpeedCampaign(
-            campaign_id=self._wavespeed_campaign_id,
-            name=self._wavespeed_campaign_name,
-            queue=queue,
-        )
-        self.wavespeed_campaign_store.save(campaign, active=True)
+        with self._wavespeed_campaign_persist_lock:
+            campaign = WaveSpeedCampaign(
+                campaign_id=self._wavespeed_campaign_id,
+                name=self._wavespeed_campaign_name,
+                queue=queue,
+            )
+            self.wavespeed_campaign_store.save(campaign, active=True)
 
     def _validate_wavespeed_queue(self, queue) -> None:
         if not queue.frame_path:
@@ -790,7 +793,11 @@ class MainWindow(QMainWindow):
         )
         error = None
         try:
-            runner.run(queue, cancel_event=self._wavespeed_queue_cancel_event)
+            runner.run(
+                queue,
+                cancel_event=self._wavespeed_queue_cancel_event,
+                parallel=queue.execution_mode == "parallel",
+            )
         except Exception as exc:
             error = exc
         finally:

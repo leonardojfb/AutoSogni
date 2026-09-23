@@ -154,6 +154,8 @@ def test_wavespeed_campaign_controls_are_visible(tmp_path: Path):
     assert window.wavespeed_campaign_name_edit is not None
     assert window.wavespeed_campaign_save_button.text() == "Guardar campaña"
     assert window.wavespeed_campaign_new_button.text() == "Nueva campaña"
+    assert window.wavespeed_execution_mode_combo.currentData() == "sequential"
+    assert window.wavespeed_execution_mode_combo.findData("parallel") >= 0
 
 
 def test_wavespeed_campaign_survives_window_reopen(tmp_path: Path):
@@ -162,12 +164,14 @@ def test_wavespeed_campaign_survives_window_reopen(tmp_path: Path):
     db.initialize()
     repo = CampaignRepository(db)
     campaign_store = WaveSpeedCampaignStore(tmp_path / "campaigns.json")
+    queue_store = WaveSpeedQueueStore(tmp_path / "legacy-queue.json")
 
     first = MainWindow(
         repo,
         SogniClient(""),
         ApiKeyStore(tmp_path / "key.txt"),
         wavespeed_campaign_store=campaign_store,
+        wavespeed_queue_store=queue_store,
     )
     first.wavespeed_queue_widget.set_campaign_name("Frame azul")
     first.wavespeed_queue_widget.set_frame_path("C:/frames/frame-a.png")
@@ -179,6 +183,7 @@ def test_wavespeed_campaign_survives_window_reopen(tmp_path: Path):
         SogniClient(""),
         ApiKeyStore(tmp_path / "key-2.txt"),
         wavespeed_campaign_store=campaign_store,
+        wavespeed_queue_store=queue_store,
     )
 
     assert second.wavespeed_campaign_name_edit.text() == "Frame azul"

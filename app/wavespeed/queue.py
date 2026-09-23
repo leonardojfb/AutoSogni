@@ -88,6 +88,7 @@ class WaveSpeedQueue:
     frame_path: str = ""
     output_dir: str = ""
     items: list[WaveSpeedQueueItem] = field(default_factory=list)
+    execution_mode: str = "sequential"
     paused: bool = False
     updated_at: str = field(default_factory=_now)
 
@@ -96,6 +97,7 @@ class WaveSpeedQueue:
             "frame_path": self.frame_path,
             "output_dir": self.output_dir,
             "items": [item.to_dict() for item in self.items],
+            "execution_mode": self.execution_mode,
             "paused": self.paused,
             "updated_at": self.updated_at,
         }
@@ -108,6 +110,7 @@ class WaveSpeedQueue:
             frame_path=str(value.get("frame_path") or ""),
             output_dir=str(value.get("output_dir") or ""),
             items=items,
+            execution_mode=str(value.get("execution_mode") or "sequential"),
             paused=bool(value.get("paused", False)),
             updated_at=str(value.get("updated_at") or _now()),
         )

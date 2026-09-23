@@ -47,7 +47,10 @@ the same queue; a different frame name is rejected instead of mixing frames.
 Queues are saved as named WaveSpeed campaigns in
 `data/wavespeed_campaigns.json`. The campaign selector restores the last active
 campaign on startup, and the previous single-queue file is migrated
-automatically the first time this feature is opened.
+automatically the first time this feature is opened. Each campaign can run in
+`Secuencial` mode, which waits for each task before submitting the next, or
+`Paralelo` mode, which submits all pending jobs first and polls their results
+concurrently.
 
 ## Sogni API Notes
 
