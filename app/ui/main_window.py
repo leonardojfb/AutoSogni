@@ -271,10 +271,6 @@ class MainWindow(QMainWindow):
             remove.clicked.connect(lambda _checked=False, k=kind: self._wavespeed_remove_files(k))
             buttons.addWidget(add)
             buttons.addWidget(remove)
-            if kind == "reference_images":
-                add_to_queue = QPushButton("Agregar a la cola")
-                add_to_queue.clicked.connect(self._wavespeed_add_video_to_queue_from_image)
-                buttons.addWidget(add_to_queue)
             box_layout.addLayout(buttons)
             references_layout.addWidget(box, 0, column)
         layout.addWidget(references)
@@ -333,6 +329,11 @@ class MainWindow(QMainWindow):
         self.wavespeed_price_label = QLabel("Precio: no estimado")
         estimate = QPushButton("Estimar precio")
         estimate.clicked.connect(self._wavespeed_estimate_price)
+        self.wavespeed_queue_estimate_button = QPushButton("Estimar costos cola")
+        self.wavespeed_queue_estimate_button.clicked.connect(self._estimate_wavespeed_queue_prices)
+        self.wavespeed_queue_total_label = QLabel("Total cola: no estimado")
+        self.wavespeed_queue_add_button = QPushButton("Agregar a la cola")
+        self.wavespeed_queue_add_button.clicked.connect(self._wavespeed_add_current_to_queue)
         self.wavespeed_generate_button = QPushButton("Generar video")
         self.wavespeed_generate_button.clicked.connect(self._wavespeed_generate)
         cancel_polling = QPushButton("Detener polling")
@@ -349,10 +350,13 @@ class MainWindow(QMainWindow):
         output_form.addWidget(estimate, 1, 0)
         output_form.addWidget(self.wavespeed_price_label, 1, 1)
         output_form.addWidget(self.wavespeed_generate_button, 1, 2)
+        output_form.addWidget(self.wavespeed_queue_estimate_button, 2, 0)
+        output_form.addWidget(self.wavespeed_queue_total_label, 2, 1)
         output_form.addWidget(cancel_polling, 2, 2)
-        output_form.addWidget(self.wavespeed_task_edit, 3, 0, 1, 2)
-        output_form.addWidget(query, 3, 2)
-        output_form.addWidget(delete, 4, 2)
+        output_form.addWidget(self.wavespeed_queue_add_button, 3, 0)
+        output_form.addWidget(self.wavespeed_task_edit, 4, 0, 1, 2)
+        output_form.addWidget(query, 4, 2)
+        output_form.addWidget(delete, 5, 2)
         layout.addWidget(output)
 
         self.wavespeed_status_label = QLabel("Listo. Agregá al menos una referencia.")
@@ -372,7 +376,6 @@ class MainWindow(QMainWindow):
         self.wavespeed_queue_widget.retry_requested.connect(self._retry_wavespeed_item)
         self.wavespeed_queue_widget.retry_failed_requested.connect(self._retry_wavespeed_failed)
         self.wavespeed_queue_widget.clear_completed_requested.connect(self._clear_wavespeed_completed)
-        self.wavespeed_queue_widget.estimate_requested.connect(self._estimate_wavespeed_queue_prices)
         self.wavespeed_queue_widget.queue_changed.connect(self._save_wavespeed_queue)
         self.wavespeed_queue_widget.load_queue(self.wavespeed_queue_store.load())
         layout.addWidget(self.wavespeed_queue_widget)
@@ -405,24 +408,56 @@ class MainWindow(QMainWindow):
             existing.add(path)
         self.wavespeed_status_label.setText(f"{widget.count()}/{limits[kind]} referencias en {kind}.")
 
-    def _wavespeed_add_video_to_queue_from_image(self) -> None:
-        selected_images = self.wavespeed_reference_lists["reference_images"].selectedItems()
-        if len(selected_images) != 1:
+    def _wavespeed_add_current_to_queue(self) -> None:
+        image_paths = [
+            str(self.wavespeed_reference_lists["reference_images"].item(index).data(Qt.UserRole))
+            for index in range(self.wavespeed_reference_lists["reference_images"].count())
+        ]
+        video_paths = [
+            str(self.wavespeed_reference_lists["reference_videos"].item(index).data(Qt.UserRole))
+            for index in range(self.wavespeed_reference_lists["reference_videos"].count())
+        ]
+        if len(image_paths) != 1:
             self.wavespeed_status_label.setText("Seleccioná exactamente un frame para la cola.")
             return
-        frame_path = str(selected_images[0].data(Qt.UserRole))
-        selected_videos, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Agregar videos a la cola",
-            filter="Videos (*.mp4 *.mov)",
-        )
-        if not selected_videos:
+        if not video_paths:
+            self.wavespeed_status_label.setText("Agregá al menos un video antes de enviarlo a la cola.")
             return
-        self.wavespeed_queue_widget.set_frame_path(frame_path)
-        for selected_path in selected_videos:
-            self.wavespeed_queue_widget.add_video(str(Path(selected_path).resolve()))
-        self.wavespeed_queue_widget.set_error(
-            f"{len(selected_videos)} video(s) agregado(s) con el frame seleccionado."
+
+        frame_path = image_paths[0]
+        queue = self.wavespeed_queue_widget.queue()
+        if queue.frame_path and Path(queue.frame_path).name.casefold() != Path(frame_path).name.casefold():
+            self.wavespeed_status_label.setText(
+                f"El frame {Path(frame_path).name} es distinto al de la cola ({Path(queue.frame_path).name})."
+            )
+            return
+
+        snapshot = self._wavespeed_snapshot()
+        queue.frame_path = frame_path
+        queue.output_dir = snapshot["output_dir"]
+        existing_videos = {str(Path(item.video_path).resolve()).casefold() for item in queue.items}
+        added_count = 0
+        for video_path in video_paths:
+            if str(Path(video_path).resolve()).casefold() in existing_videos:
+                continue
+            queue.items.append(
+                WaveSpeedQueueItem(
+                    video_path=video_path,
+                    prompt=snapshot["prompt"],
+                    resolution=snapshot["resolution"],
+                    aspect_ratio=snapshot["aspect_ratio"],
+                    duration=snapshot["duration"],
+                    enable_prompt_expansion=snapshot["enable_prompt_expansion"],
+                    enable_audio=snapshot["enable_audio"],
+                    seed=snapshot["seed"],
+                )
+            )
+            existing_videos.add(str(Path(video_path).resolve()).casefold())
+            added_count += 1
+        self.wavespeed_queue_widget.load_queue(queue)
+        self.wavespeed_queue_store.save(queue)
+        self.wavespeed_status_label.setText(
+            f"{added_count} job(s) agregado(s) a la cola del frame {Path(frame_path).name}."
         )
 
     def _wavespeed_remove_files(self, kind: str) -> None:
@@ -619,10 +654,11 @@ class MainWindow(QMainWindow):
         try:
             self._validate_wavespeed_queue(queue)
         except Exception as exc:
-            self.wavespeed_queue_widget.set_total_price(None, str(exc))
+            self.wavespeed_queue_total_label.setText(f"Total cola: error: {exc}")
             return
 
-        self.wavespeed_queue_widget.set_estimating(True)
+        self.wavespeed_queue_estimate_button.setEnabled(False)
+        self.wavespeed_queue_total_label.setText("Total cola: calculando...")
         self.wavespeed_queue_widget.set_error("Estimando costos...")
 
         def task():
@@ -1036,12 +1072,12 @@ class MainWindow(QMainWindow):
         elif kind == "queue_item":
             self.wavespeed_queue_widget.set_item_update(payload)
         elif kind == "queue_prices":
-            self.wavespeed_queue_widget.set_estimating(False)
+            self.wavespeed_queue_estimate_button.setEnabled(True)
             if isinstance(payload, Exception):
-                self.wavespeed_queue_widget.set_total_price(None, str(payload))
+                self.wavespeed_queue_total_label.setText(f"Total cola: error: {payload}")
                 self.wavespeed_queue_widget.set_error(str(payload))
             else:
-                self.wavespeed_queue_widget.set_total_price(float(payload))
+                self.wavespeed_queue_total_label.setText(f"Total cola: ${float(payload):.4f} USD")
                 self.wavespeed_queue_widget.set_error("Costos estimados.")
         elif kind == "queue_finished":
             self._wavespeed_queue_running = False

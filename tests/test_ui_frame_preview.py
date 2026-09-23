@@ -1,7 +1,8 @@
 import tempfile
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QListWidgetItem
 
 from app.database.db import Database
 from app.database.repositories import CampaignRepository
@@ -83,8 +84,9 @@ def test_wavespeed_queue_panel_adds_rows_and_exposes_retry(tmp_path: Path):
     assert item.video_path == "video.mp4"
     assert item.status == QueueStatus.PENDING
     assert window.wavespeed_queue_widget.has_retry_control(item.item_id)
-    assert window.wavespeed_queue_widget.total_price_label.text() == "Total estimado: no calculado"
-    assert window.wavespeed_queue_widget.estimate_button.text() == "Estimar costos"
+    assert window.wavespeed_queue_widget.table.item(0, 9).text() == "-"
+    assert window.wavespeed_queue_estimate_button.text() == "Estimar costos cola"
+    assert window.wavespeed_queue_total_label.text() == "Total cola: no estimado"
 
 
 def test_wavespeed_image_panel_exposes_add_to_queue_action(tmp_path: Path):
@@ -95,10 +97,42 @@ def test_wavespeed_image_panel_exposes_add_to_queue_action(tmp_path: Path):
 
     window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
 
-    assert any(
-        button.text() == "Agregar a la cola"
-        for button in window.findChildren(__import__("PySide6.QtWidgets", fromlist=["QPushButton"]).QPushButton)
-    )
+    assert window.wavespeed_queue_add_button.text() == "Agregar a la cola"
+
+
+def test_add_to_queue_groups_jobs_by_frame_name(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+    window.wavespeed_queue_store = WaveSpeedQueueStore(tmp_path / "queue.json")
+    window.wavespeed_queue_widget.load_queue(WaveSpeedQueue())
+
+    def add_reference(kind: str, path: str):
+        item = QListWidgetItem(Path(path).name)
+        item.setData(Qt.UserRole, path)
+        window.wavespeed_reference_lists[kind].addItem(item)
+
+    add_reference("reference_images", "C:/frames/frame-a.png")
+    add_reference("reference_videos", "C:/videos/video-1.mp4")
+    window._wavespeed_add_current_to_queue()
+    add_reference("reference_videos", "C:/videos/video-2.mp4")
+    window._wavespeed_add_current_to_queue()
+
+    queue = window.wavespeed_queue_widget.queue()
+    assert len(queue.items) == 2
+    assert all(Path(item.video_path).name.startswith("video-") for item in queue.items)
+    assert all(Path(item.video_path).name for item in queue.items)
+    assert Path(queue.frame_path).name == "frame-a.png"
+
+    window.wavespeed_reference_lists["reference_images"].clear()
+    add_reference("reference_images", "C:/frames/frame-b.png")
+    add_reference("reference_videos", "C:/videos/video-3.mp4")
+    window._wavespeed_add_current_to_queue()
+
+    assert len(window.wavespeed_queue_widget.queue().items) == 2
+    assert "distinto" in window.wavespeed_status_label.text()
 
 
 def test_wavespeed_queue_event_updates_row_and_retry_button(tmp_path: Path):

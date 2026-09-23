@@ -40,8 +40,10 @@ next row. Failed rows are marked `Fallido`, do not stop later rows, and expose a
 stored there. Queue runs use asynchronous task polling, so webhook, sync mode,
 and Base64 output are disabled for that workflow. Use `Estimar costos` to see
 the price of every row and the total before submitting. When an image is
-selected in the references panel, `Agregar a la cola` opens a video picker and
-adds those videos with the selected image as the shared frame.
+loaded in the references panel, `Agregar a la cola` in the
+`Estimación, salida y ejecución` panel adds the current videos with that image
+as the shared frame. Repeated additions with the same frame name append jobs to
+the same queue; a different frame name is rejected instead of mixing frames.
 
 ## Sogni API Notes
 
