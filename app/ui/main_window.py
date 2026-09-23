@@ -376,6 +376,7 @@ class MainWindow(QMainWindow):
         self.wavespeed_queue_widget.retry_requested.connect(self._retry_wavespeed_item)
         self.wavespeed_queue_widget.retry_failed_requested.connect(self._retry_wavespeed_failed)
         self.wavespeed_queue_widget.clear_completed_requested.connect(self._clear_wavespeed_completed)
+        self.wavespeed_queue_widget.estimate_requested.connect(self._estimate_wavespeed_queue_prices)
         self.wavespeed_queue_widget.queue_changed.connect(self._save_wavespeed_queue)
         self.wavespeed_queue_widget.load_queue(self.wavespeed_queue_store.load())
         layout.addWidget(self.wavespeed_queue_widget)
@@ -655,10 +656,12 @@ class MainWindow(QMainWindow):
             self._validate_wavespeed_queue(queue)
         except Exception as exc:
             self.wavespeed_queue_total_label.setText(f"Total cola: error: {exc}")
+            self.wavespeed_queue_widget.set_total_price(None, str(exc))
             return
 
         self.wavespeed_queue_estimate_button.setEnabled(False)
         self.wavespeed_queue_total_label.setText("Total cola: calculando...")
+        self.wavespeed_queue_widget.set_estimating(True)
         self.wavespeed_queue_widget.set_error("Estimando costos...")
 
         def task():
@@ -1073,11 +1076,14 @@ class MainWindow(QMainWindow):
             self.wavespeed_queue_widget.set_item_update(payload)
         elif kind == "queue_prices":
             self.wavespeed_queue_estimate_button.setEnabled(True)
+            self.wavespeed_queue_widget.set_estimating(False)
             if isinstance(payload, Exception):
                 self.wavespeed_queue_total_label.setText(f"Total cola: error: {payload}")
+                self.wavespeed_queue_widget.set_total_price(None, str(payload))
                 self.wavespeed_queue_widget.set_error(str(payload))
             else:
                 self.wavespeed_queue_total_label.setText(f"Total cola: ${float(payload):.4f} USD")
+                self.wavespeed_queue_widget.set_total_price(float(payload))
                 self.wavespeed_queue_widget.set_error("Costos estimados.")
         elif kind == "queue_finished":
             self._wavespeed_queue_running = False

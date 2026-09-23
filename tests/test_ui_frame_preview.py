@@ -85,6 +85,8 @@ def test_wavespeed_queue_panel_adds_rows_and_exposes_retry(tmp_path: Path):
     assert item.status == QueueStatus.PENDING
     assert window.wavespeed_queue_widget.has_retry_control(item.item_id)
     assert window.wavespeed_queue_widget.table.item(0, 9).text() == "-"
+    assert window.wavespeed_queue_widget.estimate_button.text() == "Estimar costos"
+    assert window.wavespeed_queue_widget.total_price_label.text() == "Total estimado: no calculado"
     assert window.wavespeed_queue_estimate_button.text() == "Estimar costos cola"
     assert window.wavespeed_queue_total_label.text() == "Total cola: no estimado"
 
