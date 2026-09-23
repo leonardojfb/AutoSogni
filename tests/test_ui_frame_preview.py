@@ -8,6 +8,7 @@ from app.database.repositories import CampaignRepository
 from app.sogni.auth import ApiKeyStore
 from app.sogni.client import SogniClient
 from app.ui.main_window import MainWindow
+from app.wavespeed.queue import QueueStatus, WaveSpeedQueue
 
 
 def _app():
@@ -66,3 +67,19 @@ def test_wavespeed_event_handler_belongs_to_main_window(tmp_path: Path):
     window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
 
     assert "_handle_wavespeed_event" in type(window).__dict__
+
+
+def test_wavespeed_queue_panel_adds_rows_and_exposes_retry(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+    window.wavespeed_queue_widget.load_queue(WaveSpeedQueue(frame_path="frame.png", items=[]))
+    window.wavespeed_queue_widget.add_item_for_test("video.mp4")
+
+    item = window.wavespeed_queue_widget.queue().items[0]
+    assert item.video_path == "video.mp4"
+    assert item.status == QueueStatus.PENDING
+    assert window.wavespeed_queue_widget.has_retry_control(item.item_id)

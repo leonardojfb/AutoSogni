@@ -15,6 +15,7 @@ from app.sogni.auth import ApiKeyStore
 from app.utils.paths import data_dir
 from app.wavespeed.client import WaveSpeedClient
 from app.wavespeed.history import WaveSpeedHistoryStore
+from app.ui.wavespeed_queue import WaveSpeedQueueWidget
 from app.wavespeed.validation import (
     ASPECT_RATIOS as WAVESPEED_ASPECT_RATIOS,
     RESOLUTIONS as WAVESPEED_RESOLUTIONS,
@@ -354,6 +355,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.wavespeed_status_label)
         layout.addWidget(self.wavespeed_progress)
         layout.addWidget(self.wavespeed_raw_edit)
+
+        self.wavespeed_queue_widget = WaveSpeedQueueWidget()
+        layout.addWidget(self.wavespeed_queue_widget)
 
         self.wavespeed_history_table = QTableWidget(0, 5)
         self.wavespeed_history_table.setHorizontalHeaderLabels(["Task", "Estado", "Archivo", "Creado", "Error"])
