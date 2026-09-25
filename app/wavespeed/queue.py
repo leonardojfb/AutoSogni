@@ -44,6 +44,7 @@ class WaveSpeedQueueItem:
     enable_prompt_expansion: bool = False
     enable_audio: bool = True
     seed: int = -1
+    model_id: str = "alibaba/wan-3.0/reference-to-video"
     status: str = QueueStatus.PENDING
     task_id: str = ""
     price: float | None = None
@@ -73,6 +74,7 @@ class WaveSpeedQueueItem:
             "enable_prompt_expansion",
             "enable_audio",
             "seed",
+            "model_id",
             "status",
             "task_id",
             "price",

@@ -9,6 +9,7 @@ from app.wavespeed.queue import (
     WaveSpeedQueueStore,
 )
 from app.wavespeed.schemas import WaveSpeedPrediction
+from app.wavespeed.validation import SEEDANCE_MODEL_ID
 
 
 class FakeWaveSpeedClient:
@@ -37,6 +38,35 @@ class FakeWaveSpeedClient:
         if on_update:
             on_update(result)
         return result
+
+
+def test_seedance_queue_persists_model_and_uses_seedance_endpoint(tmp_path):
+    from app.wavespeed.queue_runner import WaveSpeedQueueRunner
+
+    calls = []
+
+    class Client:
+        def estimate_price(self, payload, *, model_id):
+            calls.append(("price", model_id, payload))
+            return {"price": 1.0}
+
+        def submit(self, payload, *, model_id):
+            calls.append(("submit", model_id, payload))
+            return WaveSpeedPrediction("pred-seedance", "completed", outputs=["url"])
+
+    item = WaveSpeedQueueItem(video_path="video.mp4", prompt="Scene", model_id=SEEDANCE_MODEL_ID,
+                              duration=15, resolution="4k", aspect_ratio="21:9", enable_prompt_expansion=True)
+    queue = WaveSpeedQueue(frame_path="frame.png", output_dir=str(tmp_path), items=[item])
+    store = WaveSpeedQueueStore(tmp_path / "queue.json")
+    store.save(queue)
+    restored = store.load()
+    WaveSpeedQueueRunner(Client(), upload_file=lambda path: {"download_url": f"https://cdn/{path}"},
+                         save_output=lambda *_args: "output.mp4").run(restored)
+
+    assert restored.items[0].status == QueueStatus.COMPLETED
+    assert [call[:2] for call in calls] == [("price", SEEDANCE_MODEL_ID), ("submit", SEEDANCE_MODEL_ID)]
+    assert calls[1][2]["enable_web_search"] is True
+    assert "seed" not in calls[1][2]
 
 
 def test_queue_store_round_trips_items_and_redacts_remote_values(tmp_path):

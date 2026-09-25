@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.wavespeed.queue import QueueStatus, WaveSpeedQueue, WaveSpeedQueueItem
-from app.wavespeed.validation import TERMINAL_STATUSES, build_reference_video_payload
+from app.wavespeed.validation import (
+    MODEL_ID, SEEDANCE_MODEL_ID, TERMINAL_STATUSES,
+    build_reference_video_payload, build_seedance_payload,
+)
 
 
 class WaveSpeedQueueRunner:
@@ -37,6 +40,33 @@ class WaveSpeedQueueRunner:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _payload(item: WaveSpeedQueueItem, frame_url: str, video_url: str) -> dict[str, Any]:
+        if item.model_id == SEEDANCE_MODEL_ID:
+            return build_seedance_payload(
+                prompt=item.prompt, reference_images=[frame_url], reference_videos=[video_url],
+                resolution=item.resolution, aspect_ratio=item.aspect_ratio, duration=item.duration,
+                enable_web_search=item.enable_prompt_expansion, generate_audio=item.enable_audio,
+            )
+        if item.model_id != MODEL_ID:
+            raise ValueError(f"Unsupported queue model: {item.model_id}")
+        return build_reference_video_payload(
+            prompt=item.prompt, reference_images=[frame_url], reference_videos=[video_url],
+            resolution=item.resolution, aspect_ratio=item.aspect_ratio, duration=item.duration,
+            enable_prompt_expansion=item.enable_prompt_expansion, enable_audio=item.enable_audio,
+            seed=item.seed, enable_sync_mode=False, enable_base64_output=False,
+        )
+
+    def _estimate(self, payload: dict[str, Any], model_id: str) -> dict[str, Any]:
+        if model_id == MODEL_ID:
+            return self.client.estimate_price(payload)
+        return self.client.estimate_price(payload, model_id=model_id)
+
+    def _submit(self, payload: dict[str, Any], model_id: str):
+        if model_id == MODEL_ID:
+            return self.client.submit(payload)
+        return self.client.submit(payload, model_id=model_id)
+
     def run(self, queue: WaveSpeedQueue, cancel_event=None, *, parallel: bool = False) -> WaveSpeedQueue:
         if parallel:
             return self._run_parallel(queue, cancel_event)
@@ -62,21 +92,9 @@ class WaveSpeedQueueRunner:
                     video_url = self.upload_file(Path(item.video_path))["download_url"]
                     uploaded_videos[video_key] = video_url
 
-                payload = build_reference_video_payload(
-                    prompt=item.prompt,
-                    reference_images=[frame_url],
-                    reference_videos=[video_url],
-                    resolution=item.resolution,
-                    aspect_ratio=item.aspect_ratio,
-                    duration=item.duration,
-                    enable_prompt_expansion=item.enable_prompt_expansion,
-                    enable_audio=item.enable_audio,
-                    seed=item.seed,
-                    enable_sync_mode=False,
-                    enable_base64_output=False,
-                )
+                payload = self._payload(item, frame_url, video_url)
                 try:
-                    item.price = self._price(self.client.estimate_price(payload))
+                    item.price = self._price(self._estimate(payload, item.model_id))
                     self._notify(item)
                 except Exception:
                     item.price = None
@@ -90,7 +108,7 @@ class WaveSpeedQueueRunner:
                         self._notify(item)
                         continue
                 else:
-                    prediction = self.client.submit(payload)
+                    prediction = self._submit(payload, item.model_id)
                     item.task_id = prediction.id
                     self._notify(item)
                 if prediction.status in TERMINAL_STATUSES:
@@ -143,21 +161,9 @@ class WaveSpeedQueueRunner:
                 if video_url is None:
                     video_url = self.upload_file(Path(item.video_path))["download_url"]
                     uploaded_videos[video_key] = video_url
-                payload = build_reference_video_payload(
-                    prompt=item.prompt,
-                    reference_images=[frame_url],
-                    reference_videos=[video_url],
-                    resolution=item.resolution,
-                    aspect_ratio=item.aspect_ratio,
-                    duration=item.duration,
-                    enable_prompt_expansion=item.enable_prompt_expansion,
-                    enable_audio=item.enable_audio,
-                    seed=item.seed,
-                    enable_sync_mode=False,
-                    enable_base64_output=False,
-                )
+                payload = self._payload(item, frame_url, video_url)
                 try:
-                    item.price = self._price(self.client.estimate_price(payload))
+                    item.price = self._price(self._estimate(payload, item.model_id))
                 except Exception:
                     item.price = None
                 self._notify(item)
@@ -172,7 +178,7 @@ class WaveSpeedQueueRunner:
             if item.task_id:
                 prediction = self.client.get_result(item.task_id)
             else:
-                prediction = self.client.submit(payload)
+                prediction = self._submit(payload, item.model_id)
                 item.task_id = prediction.id
             self._notify(item)
             return item, prediction
@@ -235,20 +241,8 @@ class WaveSpeedQueueRunner:
                 if video_url is None:
                     video_url = self.upload_file(Path(item.video_path))["download_url"]
                     uploaded_videos[video_key] = video_url
-                payload = build_reference_video_payload(
-                    prompt=item.prompt,
-                    reference_images=[frame_url],
-                    reference_videos=[video_url],
-                    resolution=item.resolution,
-                    aspect_ratio=item.aspect_ratio,
-                    duration=item.duration,
-                    enable_prompt_expansion=item.enable_prompt_expansion,
-                    enable_audio=item.enable_audio,
-                    seed=item.seed,
-                    enable_sync_mode=False,
-                    enable_base64_output=False,
-                )
-                item.price = self._price(self.client.estimate_price(payload))
+                payload = self._payload(item, frame_url, video_url)
+                item.price = self._price(self._estimate(payload, item.model_id))
                 item.error = ""
                 if item.price is not None:
                     total += item.price

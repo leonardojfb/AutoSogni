@@ -5,6 +5,8 @@ from typing import Any
 from pathlib import Path
 
 MODEL_ID = "alibaba/wan-3.0/reference-to-video"
+SEEDANCE_MODEL_ID = "bytedance/seedance-2.0/text-to-video"
+FLUX_MODEL_ID = "wavespeed-ai/flux-2-klein-9b/edit"
 RESOLUTIONS = ("480p", "720p", "1080p")
 ASPECT_RATIOS = ("16:9", "9:16", "1:1", "4:3", "3:4")
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "timeout", "deleted"})
@@ -124,4 +126,51 @@ def build_reference_video_payload(
 
     validate_request(payload)
     payload.pop("reference_video_duration_seconds", None)
+    return payload
+
+
+def build_seedance_payload(
+    *, prompt: str, reference_images: list[str] | None = None,
+    reference_videos: list[str] | None = None, reference_audios: list[str] | None = None,
+    resolution: str = "720p", aspect_ratio: str = "16:9", duration: int = 5,
+    enable_web_search: bool = False, generate_audio: bool = True,
+) -> dict[str, Any]:
+    if not prompt.strip():
+        raise ValueError("Prompt is required.")
+    if resolution not in (*RESOLUTIONS, "4k"):
+        raise ValueError("Invalid Seedance resolution.")
+    if aspect_ratio not in (*ASPECT_RATIOS, "21:9"):
+        raise ValueError("Invalid Seedance aspect ratio.")
+    if not 4 <= duration <= 15:
+        raise ValueError("Seedance duration must be 4 to 15 seconds.")
+    references = {
+        "reference_images": reference_images or [],
+        "reference_videos": reference_videos or [],
+        "reference_audios": reference_audios or [],
+    }
+    for kind, limit in (("reference_images", 9), ("reference_videos", 3), ("reference_audios", 3)):
+        if len(references[kind]) > limit:
+            raise ValueError(f"Seedance supports at most {limit} {kind}.")
+    payload: dict[str, Any] = {
+        "prompt": prompt, "resolution": resolution, "aspect_ratio": aspect_ratio,
+        "duration": duration, "enable_web_search": bool(enable_web_search),
+        "generate_audio": bool(generate_audio),
+    }
+    payload.update({kind: values for kind, values in references.items() if values})
+    return payload
+
+
+def build_flux_payload(*, prompt: str, images: list[str], size: str = "", seed: int = -1,
+                       enable_sync_mode: bool = False, enable_base64_output: bool = False) -> dict[str, Any]:
+    if not prompt.strip():
+        raise ValueError("Prompt is required.")
+    if not 1 <= len(images) <= 3:
+        raise ValueError("Flux requires 1 to 3 images.")
+    if seed < -1 or seed > 2_147_483_647:
+        raise ValueError("Invalid Flux seed.")
+    payload: dict[str, Any] = {"prompt": prompt, "images": list(images), "seed": seed,
+                               "enable_sync_mode": bool(enable_sync_mode),
+                               "enable_base64_output": bool(enable_base64_output)}
+    if size.strip():
+        payload["size"] = size.strip()
     return payload

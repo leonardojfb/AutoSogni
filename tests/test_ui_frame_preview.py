@@ -1,5 +1,5 @@
-import tempfile
 from pathlib import Path
+import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QListWidgetItem
@@ -17,6 +17,10 @@ from app.wavespeed.queue import (
     WaveSpeedQueueItem,
     WaveSpeedQueueStore,
 )
+from app.wavespeed.validation import SEEDANCE_MODEL_ID, FLUX_MODEL_ID
+from app.wavespeed.flux_queue import FluxCampaignStore
+from app.wavespeed.history import WaveSpeedHistoryStore
+from app.wavespeed.schemas import WaveSpeedPrediction
 
 
 def _app():
@@ -52,7 +56,10 @@ def test_clicking_frame_row_loads_thumbnail_preview(tmp_path: Path):
     )
     repo.insert_frame(campaign_id, str(image_path), image_path.name, "Blue Test", "sha")
 
-    window = MainWindow(repo, SogniClient(""), ApiKeyStore(Path(tempfile.mkdtemp()) / "key.txt"))
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"),
+                        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+                        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+                        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"))
     window.current_campaign_id = campaign_id
     window._refresh_tables()
 
@@ -72,9 +79,143 @@ def test_wavespeed_event_handler_belongs_to_main_window(tmp_path: Path):
     db.initialize()
     repo = CampaignRepository(db)
 
-    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"),
+                        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+                        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+                        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"))
 
     assert "_handle_wavespeed_event" in type(window).__dict__
+
+
+def test_seedance_and_flux_tabs_build_model_specific_payloads(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    window = MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "sogni-key.txt"),
+        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"),
+    )
+    window.wavespeed_model_combo.setCurrentIndex(1)
+    window.wavespeed_prompt_edit.setPlainText("Seedance prompt")
+    window.wavespeed_resolution_combo.setCurrentText("4k")
+    window.wavespeed_aspect_combo.setCurrentText("21:9")
+    window.wavespeed_duration_spin.setValue(15)
+    payload, _ = window._wavespeed_upload_and_build(window._wavespeed_snapshot())
+    assert window.wavespeed_model_combo.currentData() == SEEDANCE_MODEL_ID
+    assert payload["prompt"] == "Seedance prompt"
+    assert payload["resolution"] == "4k"
+    assert "seed" not in payload and "enable_prompt_expansion" not in payload
+
+    image = tmp_path / "source.png"
+    image.write_bytes(b"png")
+    entry = QListWidgetItem(image.name)
+    entry.setData(Qt.UserRole, str(image))
+    window.flux_images.addItem(entry)
+    window.flux_prompt_edit.setPlainText("Flux prompt")
+    window._wavespeed_upload_cached = lambda _path: {"download_url": "https://cdn/image.png"}
+    flux_payload = window._flux_upload_and_build(window._flux_snapshot())
+    assert FLUX_MODEL_ID == "wavespeed-ai/flux-2-klein-9b/edit"
+    assert flux_payload["images"] == ["https://cdn/image.png"]
+    assert flux_payload["prompt"] == "Flux prompt"
+
+
+def test_flux_add_to_queue_persists_snapshot_in_its_own_campaign(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    store = FluxCampaignStore(tmp_path / "flux_campaigns.json")
+    window = MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "sogni-key.txt"),
+        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "wavespeed_campaigns.json"),
+        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "wavespeed_queue.json"),
+        flux_campaign_store=store,
+    )
+    video_campaign_bytes = (tmp_path / "wavespeed_campaigns.json").read_bytes()
+    image = tmp_path / "source.png"
+    image.write_bytes(b"png")
+    entry = QListWidgetItem(image.name)
+    entry.setData(Qt.UserRole, str(image))
+    window.flux_images.addItem(entry)
+    window.flux_prompt_edit.setPlainText("Keep exact prompt")
+    window.flux_size_edit.setText("1024*1024")
+    window._flux_add_current_to_queue()
+    window.flux_prompt_edit.setPlainText("Changed later")
+
+    campaigns, active_id = store.load()
+    assert active_id == campaigns[0].campaign_id
+    assert len(campaigns[0].queue.items) == 1
+    assert campaigns[0].queue.items[0].prompt == "Keep exact prompt"
+    assert campaigns[0].queue.items[0].image_paths == [str(image)]
+    assert campaigns[0].queue.items[0].size == "1024*1024"
+    assert window.flux_queue_widget.queue().items[0].prompt == "Keep exact prompt"
+
+    window._new_flux_campaign()
+    assert len(store.load()[0]) == 2
+    assert window.flux_queue_widget.queue().items == []
+    window._select_flux_campaign(campaigns[0].campaign_id)
+    assert window.flux_queue_widget.queue().items[0].prompt == "Keep exact prompt"
+    assert (tmp_path / "wavespeed_campaigns.json").read_bytes() == video_campaign_bytes
+
+
+def test_flux_queue_runs_from_tab_with_fake_client_and_persists_result(tmp_path: Path):
+    app = _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+
+    class Client:
+        MODEL_ID = "alibaba/wan-3.0/reference-to-video"
+        BASE_URL = "https://api.wavespeed.ai/api/v3"
+
+        def upload_file(self, path):
+            return {"download_url": f"https://cdn/{path.name}"}
+
+        def estimate_price(self, payload, *, model_id):
+            assert model_id == FLUX_MODEL_ID
+            return {"price": 0.016}
+
+        def submit(self, payload, *, model_id):
+            assert model_id == FLUX_MODEL_ID
+            assert payload["prompt"] == "Edit me"
+            return WaveSpeedPrediction("flux-task", "completed", outputs=["https://cdn/result.png"])
+
+        def download_output(self, _url, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"result")
+            return destination
+
+    store = FluxCampaignStore(tmp_path / "flux_campaigns.json")
+    window = MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "sogni-key.txt"),
+        wavespeed_client=Client(), wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "wavespeed_campaigns.json"),
+        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "wavespeed_queue.json"),
+        flux_campaign_store=store,
+    )
+    window.wavespeed_history = WaveSpeedHistoryStore(tmp_path / "history.json")
+    image = tmp_path / "input.png"
+    image.write_bytes(b"input")
+    entry = QListWidgetItem(image.name)
+    entry.setData(Qt.UserRole, str(image))
+    window.flux_images.addItem(entry)
+    window.flux_prompt_edit.setPlainText("Edit me")
+    window.flux_output_edit.setText(str(tmp_path / "outputs"))
+    window._flux_add_current_to_queue()
+    window._start_flux_queue()
+    deadline = time.monotonic() + 5
+    while window._flux_queue_running and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+
+    assert not window._flux_queue_running
+    item = store.load()[0][0].queue.items[0]
+    assert item.status == QueueStatus.COMPLETED
+    assert item.task_id == "flux-task"
+    assert Path(item.output_file).read_bytes() == b"result"
+    assert window.wavespeed_history.list()[0]["model_id"] == FLUX_MODEL_ID
 
 
 def test_wavespeed_queue_panel_adds_rows_and_exposes_retry(tmp_path: Path):
@@ -83,7 +224,10 @@ def test_wavespeed_queue_panel_adds_rows_and_exposes_retry(tmp_path: Path):
     db.initialize()
     repo = CampaignRepository(db)
 
-    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"),
+                        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+                        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+                        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"))
     window.wavespeed_queue_widget.load_queue(WaveSpeedQueue(frame_path="frame.png", items=[]))
     window.wavespeed_queue_widget.add_item_for_test("video.mp4")
 
@@ -104,7 +248,10 @@ def test_wavespeed_image_panel_exposes_add_to_queue_action(tmp_path: Path):
     db.initialize()
     repo = CampaignRepository(db)
 
-    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"),
+                        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+                        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+                        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"))
 
     assert window.wavespeed_queue_add_button.text() == "Agregar a la cola"
 
@@ -159,7 +306,10 @@ def test_wavespeed_campaign_controls_are_visible(tmp_path: Path):
     db = Database(tmp_path / "app.db")
     db.initialize()
     repo = CampaignRepository(db)
-    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"),
+                        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+                        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+                        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"))
 
     assert window.wavespeed_campaign_combo is not None
     assert window.wavespeed_campaign_name_edit is not None
@@ -272,8 +422,10 @@ def test_wavespeed_queue_event_updates_row_and_retry_button(tmp_path: Path):
     db.initialize()
     repo = CampaignRepository(db)
 
-    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
-    window.wavespeed_queue_store = WaveSpeedQueueStore(tmp_path / "queue.json")
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"),
+                        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+                        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+                        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"))
     window.wavespeed_queue_widget.load_queue(WaveSpeedQueue())
     item = window.wavespeed_queue_widget.add_item_for_test("video.mp4")
     item.status = QueueStatus.FAILED

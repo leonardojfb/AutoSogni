@@ -8,7 +8,10 @@ from typing import Any, Callable
 import httpx
 
 from app.wavespeed.schemas import WaveSpeedPrediction
-from app.wavespeed.validation import MODEL_ID, TERMINAL_STATUSES, validate_request
+from app.wavespeed.validation import (
+    MODEL_ID, SEEDANCE_MODEL_ID, FLUX_MODEL_ID, TERMINAL_STATUSES,
+    build_seedance_payload, build_flux_payload, validate_request,
+)
 
 
 class WaveSpeedApiError(RuntimeError):
@@ -86,12 +89,25 @@ class WaveSpeedClient:
             "content_type": content_type or "application/octet-stream",
         }
 
-    def submit(self, payload: dict[str, Any], webhook_url: str | None = None) -> WaveSpeedPrediction:
-        validate_request(payload, webhook_url=webhook_url)
+    def _validate_model_payload(self, payload: dict[str, Any], model_id: str, webhook_url: str | None = None) -> None:
+        if model_id == MODEL_ID:
+            validate_request(payload, webhook_url=webhook_url)
+        elif model_id == SEEDANCE_MODEL_ID:
+            build_seedance_payload(**payload)
+        elif model_id == FLUX_MODEL_ID:
+            build_flux_payload(**payload)
+        else:
+            raise ValueError(f"Unsupported WaveSpeed model: {model_id}")
+        if webhook_url and (payload.get("enable_sync_mode") or payload.get("enable_base64_output")):
+            raise ValueError("Sync mode and Base64 output cannot be combined with a webhook.")
+
+    def submit(self, payload: dict[str, Any], webhook_url: str | None = None,
+               model_id: str = MODEL_ID) -> WaveSpeedPrediction:
+        self._validate_model_payload(payload, model_id, webhook_url)
         params = {"webhook": webhook_url} if webhook_url else None
         data = self._unwrap(
             self._client.post(
-                self._url(f"/{self.MODEL_ID}"),
+                self._url(f"/{model_id}"),
                 headers=self._headers(),
                 params=params,
                 json=payload,
@@ -133,13 +149,13 @@ class WaveSpeedClient:
         data = self._unwrap(self._client.get(self._url("/balance"), headers=self._headers()))
         return float(data.get("balance", 0))
 
-    def estimate_price(self, payload: dict[str, Any]) -> dict[str, Any]:
-        validate_request(payload)
+    def estimate_price(self, payload: dict[str, Any], model_id: str = MODEL_ID) -> dict[str, Any]:
+        self._validate_model_payload(payload, model_id)
         return self._unwrap(
             self._client.post(
                 self._url("/model/price"),
                 headers=self._headers(),
-                json={"model_id": self.MODEL_ID, "inputs": payload},
+                json={"model_id": model_id, "inputs": payload},
             )
         )
 
