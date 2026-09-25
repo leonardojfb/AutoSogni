@@ -13,6 +13,8 @@ from app.core.job_runner import JobRunner
 from app.database.repositories import CampaignRepository
 from app.sogni.schemas import ModelDescriptor
 from app.sogni.auth import ApiKeyStore
+from app.sogni.loras import validate_lora_selection
+from app.ui.sogni_loras import SogniLoraDialog
 from app.utils.paths import data_dir
 from app.wavespeed.client import WaveSpeedClient
 from app.wavespeed.history import WaveSpeedHistoryStore
@@ -115,6 +117,8 @@ class MainWindow(QMainWindow):
         self._wavespeed_cancel_event = threading.Event()
         self._wavespeed_uploaded: dict[str, dict] = {}
         self.models: list[ModelDescriptor] = []
+        self._selected_sogni_loras: list[list] = []
+        self._sogni_lora_catalog: list[dict] = []
         self.current_campaign_id: int | None = None
         self._queue_running = False
         self.setWindowTitle("Sogni Video Automator")
@@ -158,6 +162,12 @@ class MainWindow(QMainWindow):
         self.org_combo = QComboBox()
         self.org_combo.addItems(["by_outfit", "flat"])
         self.model_combo = QComboBox()
+        self.model_combo.currentIndexChanged.connect(self._sogni_model_changed)
+        self.sogni_lora_button = QPushButton("Browse LoRAs")
+        self.sogni_lora_button.clicked.connect(self._open_sogni_loras)
+        self.sogni_lora_label = QLabel("Sin LoRAs")
+        self.sogni_sensitive_filter_check = QCheckBox("Filtro de contenido sensible activo")
+        self.sogni_sensitive_filter_check.setChecked(True)
         self.duration_mode_combo = QComboBox()
         self.duration_mode_combo.addItem("Detectar automaticamente", "auto")
         self.duration_mode_combo.addItem("Manual", "manual")
@@ -175,6 +185,13 @@ class MainWindow(QMainWindow):
         form.addRow("Prompts file", self._path_picker(self.prompts_edit, False))
         form.addRow("Output folder", self._path_picker(self.output_edit, True))
         form.addRow("Model", self.model_combo)
+        lora_controls = QWidget()
+        lora_layout = QHBoxLayout(lora_controls)
+        lora_layout.setContentsMargins(0, 0, 0, 0)
+        lora_layout.addWidget(self.sogni_lora_button)
+        lora_layout.addWidget(self.sogni_lora_label, 1)
+        form.addRow("MiniMax H3 LoRAs", lora_controls)
+        form.addRow("Contenido sensible", self.sogni_sensitive_filter_check)
         form.addRow("Duracion", self.duration_mode_combo)
         form.addRow("Segundos", self.duration_seconds_edit)
         form.addRow("Formato", self.aspect_ratio_combo)
@@ -1614,11 +1631,46 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "Model catalog", str(exc))
 
+    def _sogni_model_changed(self) -> None:
+        self._selected_sogni_loras = []
+        self._sogni_lora_catalog = []
+        self.sogni_lora_label.setText("Sin LoRAs")
+        model = self.model_combo.currentData()
+        model_id = model.id if model else ""
+        self.sogni_lora_button.setEnabled(model_id.startswith(("minimax-h3-fl2va-fp8_i2v", "minimax-h3-fastvideo-int8_i2v")))
+
+    def _open_sogni_loras(self) -> None:
+        model = self.model_combo.currentData()
+        if not model:
+            return
+        dialog = SogniLoraDialog(
+            self.sogni, model.id, self._selected_sogni_loras, self,
+            show_personal=not self.sogni_sensitive_filter_check.isChecked(),
+        )
+        if dialog.exec():
+            self._selected_sogni_loras = dialog.selected_loras
+            self._sogni_lora_catalog = dialog.catalog
+            self.sogni_lora_label.setText(
+                ", ".join(item[0] for item in self._selected_sogni_loras) or "Sin LoRAs"
+            )
+
     def _create_campaign(self) -> None:
         try:
             model = self.model_combo.currentData()
             if model is None:
                 model = ModelDescriptor(id=self.model_combo.currentText().strip() or "ltx25", name=self.model_combo.currentText().strip() or "LTX 2.5", media_type="video")
+            if self._selected_sogni_loras:
+                validate_lora_selection(model.id, self._selected_sogni_loras, self._sogni_lora_catalog)
+                if self.sogni_sensitive_filter_check.isChecked():
+                    selected_ids = {item[0] for item in self._selected_sogni_loras}
+                    if any(
+                        row.get("loraId") in selected_ids and (
+                            row.get("loraId", "").startswith("personal-")
+                            or (row.get("ui") or {}).get("nsfw")
+                            or (row.get("ui") or {}).get("sexual")
+                        ) for row in self._sogni_lora_catalog
+                    ):
+                        raise ValueError("Este LoRA requiere desactivar el filtro de contenido sensible.")
             campaign = CampaignManager(self.repo).create_campaign(
                 name=self.name_edit.text(),
                 frames_folder=Path(self.frames_edit.text()),
@@ -1630,6 +1682,8 @@ class MainWindow(QMainWindow):
                     self.duration_seconds_edit.text(),
                     self.aspect_ratio_combo.currentText(),
                     skip_prompt_processing=self.skip_prompt_processing_check.isChecked(),
+                    loras=self._selected_sogni_loras,
+                    safe_content_filter=self.sogni_sensitive_filter_check.isChecked(),
                 ),
                 filename_template=self.template_edit.text(),
                 organization_mode=self.org_combo.currentText(),
