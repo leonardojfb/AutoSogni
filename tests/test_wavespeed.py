@@ -9,8 +9,10 @@ from app.wavespeed.history import WaveSpeedHistoryStore
 from app.wavespeed.validation import (
     SEEDANCE_MODEL_ID,
     FLUX_MODEL_ID,
+    FACE_SWAP_MODEL_ID,
     build_seedance_payload,
     build_flux_payload,
+    build_face_swap_payload,
     build_reference_video_payload,
     validate_local_reference_file,
     validate_request,
@@ -37,11 +39,27 @@ def test_flux_requires_images_and_keeps_optional_size():
         build_flux_payload(prompt="Edit", images=[])
 
 
+def test_face_swap_requires_base_and_identity_images():
+    assert build_face_swap_payload(
+        image="https://cdn/target.png", face_image="https://cdn/identity.png",
+        target_index=0, target_gender="female", output_format="png",
+    ) == {
+        "image": "https://cdn/target.png", "face_image": "https://cdn/identity.png",
+        "target_index": 0, "target_gender": "female", "output_format": "png",
+        "enable_sync_mode": False, "enable_base64_output": False,
+    }
+    with pytest.raises(ValueError, match="base image"):
+        build_face_swap_payload(image="", face_image="https://cdn/identity.png")
+
+
 @pytest.mark.parametrize("model_id,payload", [
     (SEEDANCE_MODEL_ID, {"prompt": "Scene", "duration": 5, "resolution": "720p",
                          "aspect_ratio": "16:9", "enable_web_search": False, "generate_audio": True}),
     (FLUX_MODEL_ID, {"prompt": "Edit", "images": ["https://cdn/image.png"], "seed": -1,
                      "enable_sync_mode": False, "enable_base64_output": False}),
+    (FACE_SWAP_MODEL_ID, {"image": "https://cdn/target.png", "face_image": "https://cdn/identity.png",
+                          "target_index": 0, "target_gender": "female", "output_format": "png",
+                          "enable_sync_mode": False, "enable_base64_output": False}),
 ])
 def test_client_uses_selected_model_for_submit_and_price(model_id, payload):
     seen = []

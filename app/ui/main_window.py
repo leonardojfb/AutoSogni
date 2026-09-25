@@ -33,9 +33,11 @@ from app.wavespeed.validation import (
     MODEL_ID as WAN_MODEL_ID,
     SEEDANCE_MODEL_ID,
     FLUX_MODEL_ID,
+    FACE_SWAP_MODEL_ID,
     build_reference_video_payload,
     build_seedance_payload,
     build_flux_payload,
+    build_face_swap_payload,
     validate_local_reference_file,
 )
 
@@ -140,7 +142,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._jobs_tab(), "Jobs")
         self.tabs.addTab(self._settings_tab(), "Settings")
         self.tabs.addTab(self._wavespeed_tab(), "WaveSpeed")
-        self.tabs.addTab(self._flux_tab(), "Flux 2 Klein 9B")
+        self.tabs.addTab(self._images_tab(), "Imágenes")
         layout.addWidget(self.tabs)
         self.setCentralWidget(root)
 
@@ -475,6 +477,74 @@ class MainWindow(QMainWindow):
         self.wavespeed_base64_check.setVisible(not seedance)
         self.wavespeed_status_label.setText("Listo. Seedance acepta solo texto o referencias." if seedance else "Listo. Agregá al menos una referencia.")
 
+    def _images_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        image_tabs = QTabWidget()
+        image_tabs.addTab(self._face_swap_tab(), "Face Swap")
+        image_tabs.addTab(self._flux_tab(), "Flux Edit")
+        layout.addWidget(image_tabs)
+        return page
+
+    def _face_swap_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel(
+            "Reemplaza solo el rostro de la imagen objetivo. No usa prompt ni regenera el encuadre."
+        ))
+        self.face_swap_target_edit = QLineEdit()
+        self.face_swap_target_edit.setPlaceholderText("Frame objetivo: se conserva completo salvo el rostro")
+        target_button = QPushButton("Elegir frame objetivo")
+        target_button.clicked.connect(lambda: self._face_swap_choose_image(self.face_swap_target_edit))
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("Imagen objetivo"))
+        target_row.addWidget(self.face_swap_target_edit)
+        target_row.addWidget(target_button)
+        layout.addLayout(target_row)
+        self.face_swap_identity_edit = QLineEdit()
+        self.face_swap_identity_edit.setPlaceholderText("Retrato frontal limpio de la identidad fuente")
+        identity_button = QPushButton("Elegir rostro fuente")
+        identity_button.clicked.connect(lambda: self._face_swap_choose_image(self.face_swap_identity_edit))
+        identity_row = QHBoxLayout()
+        identity_row.addWidget(QLabel("Rostro fuente"))
+        identity_row.addWidget(self.face_swap_identity_edit)
+        identity_row.addWidget(identity_button)
+        layout.addLayout(identity_row)
+        options = QGridLayout()
+        self.face_swap_target_index = QSpinBox()
+        self.face_swap_target_index.setRange(0, 10)
+        self.face_swap_gender_combo = QComboBox()
+        self.face_swap_gender_combo.addItem("Mujer", "female")
+        self.face_swap_gender_combo.addItem("Todos", "all")
+        self.face_swap_gender_combo.addItem("Hombre", "male")
+        self.face_swap_format_combo = QComboBox()
+        self.face_swap_format_combo.addItems(["png", "jpeg", "webp"])
+        options.addWidget(QLabel("Rostro objetivo (0 = rostro más grande)"), 0, 0)
+        options.addWidget(self.face_swap_target_index, 0, 1)
+        options.addWidget(QLabel("Género objetivo"), 1, 0)
+        options.addWidget(self.face_swap_gender_combo, 1, 1)
+        options.addWidget(QLabel("Formato"), 2, 0)
+        options.addWidget(self.face_swap_format_combo, 2, 1)
+        layout.addLayout(options)
+        self.face_swap_output_edit = QLineEdit(str(data_dir() / "wavespeed_outputs"))
+        output_button = QPushButton("Carpeta")
+        output_button.clicked.connect(lambda: self._face_swap_choose_output(self.face_swap_output_edit))
+        output_row = QHBoxLayout()
+        output_row.addWidget(QLabel("Salida"))
+        output_row.addWidget(self.face_swap_output_edit)
+        output_row.addWidget(output_button)
+        layout.addLayout(output_row)
+        self.face_swap_generate_button = QPushButton("Generar Face Swap")
+        self.face_swap_generate_button.clicked.connect(self._face_swap_generate)
+        layout.addWidget(self.face_swap_generate_button)
+        self.face_swap_status_label = QLabel("Listo. Elegí el frame y un retrato frontal de la identidad.")
+        layout.addWidget(self.face_swap_status_label)
+        self.face_swap_raw_edit = QTextEdit()
+        self.face_swap_raw_edit.setReadOnly(True)
+        layout.addWidget(self.face_swap_raw_edit)
+        layout.addStretch()
+        return page
+
     def _flux_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -492,8 +562,16 @@ class MainWindow(QMainWindow):
         add.clicked.connect(self._flux_add_images)
         remove = QPushButton("Quitar seleccionadas")
         remove.clicked.connect(self._flux_remove_images)
+        move_up = QPushButton("↑")
+        move_up.setToolTip("Subir la imagen seleccionada: pasa a ser image1/image2 antes")
+        move_up.clicked.connect(lambda: self._flux_move_image(-1))
+        move_down = QPushButton("↓")
+        move_down.setToolTip("Bajar la imagen seleccionada: pasa a ser image2/image3 después")
+        move_down.clicked.connect(lambda: self._flux_move_image(1))
         image_buttons.addWidget(add)
         image_buttons.addWidget(remove)
+        image_buttons.addWidget(move_up)
+        image_buttons.addWidget(move_down)
         layout.addLayout(image_buttons)
         options = QGridLayout()
         self.flux_size_edit = QLineEdit()
@@ -580,10 +658,83 @@ class MainWindow(QMainWindow):
         for item in self.flux_images.selectedItems():
             self.flux_images.takeItem(self.flux_images.row(item))
 
+    def _flux_move_image(self, direction: int) -> None:
+        source = self.flux_images.currentRow()
+        destination = source + direction
+        if source < 0 or not 0 <= destination < self.flux_images.count():
+            return
+        item = self.flux_images.takeItem(source)
+        self.flux_images.insertItem(destination, item)
+        self.flux_images.setCurrentRow(destination)
+
     def _flux_choose_output(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta de salida")
         if selected:
             self.flux_output_edit.setText(selected)
+
+    def _face_swap_choose_image(self, edit: QLineEdit) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar imagen", filter="Images (*.png *.jpg *.jpeg *.webp *.gif)"
+        )
+        if selected:
+            edit.setText(str(Path(selected).resolve()))
+
+    def _face_swap_choose_output(self, edit: QLineEdit) -> None:
+        selected = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta de salida")
+        if selected:
+            edit.setText(selected)
+
+    def _face_swap_snapshot(self) -> dict:
+        return {
+            "image": self.face_swap_target_edit.text().strip(),
+            "face_image": self.face_swap_identity_edit.text().strip(),
+            "target_index": self.face_swap_target_index.value(),
+            "target_gender": self.face_swap_gender_combo.currentData(),
+            "output_format": self.face_swap_format_combo.currentText(),
+            "enable_sync_mode": False,
+            "enable_base64_output": False,
+            "output_dir": self.face_swap_output_edit.text().strip(),
+        }
+
+    def _face_swap_upload_and_build(self, snapshot: dict) -> dict:
+        build_face_swap_payload(**{key: snapshot[key] for key in (
+            "image", "face_image", "target_index", "target_gender", "output_format",
+            "enable_sync_mode", "enable_base64_output",
+        )})
+        target = Path(snapshot["image"])
+        identity = Path(snapshot["face_image"])
+        validate_local_reference_file(target, "reference_images")
+        validate_local_reference_file(identity, "reference_images")
+        return build_face_swap_payload(
+            image=self._wavespeed_upload_cached(target)["download_url"],
+            face_image=self._wavespeed_upload_cached(identity)["download_url"],
+            target_index=snapshot["target_index"], target_gender=snapshot["target_gender"],
+            output_format=snapshot["output_format"],
+        )
+
+    def _face_swap_generate(self) -> None:
+        snapshot = self._face_swap_snapshot()
+        self.face_swap_generate_button.setEnabled(False)
+        self.face_swap_status_label.setText("Preparando Face Swap...")
+
+        def task():
+            payload = self._face_swap_upload_and_build(snapshot)
+            prediction = self.wavespeed.submit(payload, model_id=FACE_SWAP_MODEL_ID)
+            if prediction.status not in {"completed", "failed", "cancelled", "timeout", "deleted"}:
+                prediction = self.wavespeed.poll_result(prediction.id)
+            output_file = ""
+            if prediction.status == "completed" and prediction.outputs:
+                output_file = self._wavespeed_save_output(
+                    prediction.outputs[0], snapshot, prediction.id, suffix=f".{snapshot['output_format']}"
+                )
+            self.wavespeed_history.add({
+                "task_id": prediction.id, "model_id": FACE_SWAP_MODEL_ID, "status": prediction.status,
+                "output_file": output_file, "error": prediction.error, "payload": payload,
+                "created_at": prediction.created_at,
+            })
+            return {"prediction": prediction, "output_file": output_file}
+
+        self._run_wavespeed_worker(task, "face_swap_generate")
 
     def _flux_snapshot(self) -> dict:
         return {
@@ -1646,6 +1797,18 @@ class MainWindow(QMainWindow):
     def _handle_wavespeed_event(self, kind: str, payload) -> None:
         if kind == "status":
             self.wavespeed_status_label.setText(str(payload))
+        elif kind == "face_swap_generate":
+            self.face_swap_generate_button.setEnabled(True)
+            if isinstance(payload, Exception):
+                self.face_swap_status_label.setText(f"Error: {payload}")
+            else:
+                prediction = payload["prediction"]
+                self.face_swap_raw_edit.setPlainText(json.dumps(prediction.raw, ensure_ascii=False, indent=2))
+                message = f"{prediction.id}: {prediction.status}"
+                if payload.get("output_file"):
+                    message += f" · guardado en {payload['output_file']}"
+                self.face_swap_status_label.setText(message)
+                self._wavespeed_refresh_history()
         elif kind == "flux_price":
             if isinstance(payload, Exception):
                 self.flux_price_label.setText(f"Precio: error: {payload}")
