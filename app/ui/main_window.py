@@ -164,8 +164,9 @@ class MainWindow(QMainWindow):
         self.model_combo = QComboBox()
         self.model_combo.currentIndexChanged.connect(self._sogni_model_changed)
         self.sogni_lora_button = QPushButton("Browse LoRAs")
+        self.sogni_lora_button.setToolTip("Elegí un modelo MiniMax H3 de imagen a video para ver sus LoRAs comunitarias.")
         self.sogni_lora_button.clicked.connect(self._open_sogni_loras)
-        self.sogni_lora_label = QLabel("Sin LoRAs")
+        self.sogni_lora_label = QLabel("Elegí un modelo MiniMax H3 I2V")
         self.sogni_sensitive_filter_check = QCheckBox("Filtro de contenido sensible activo")
         self.sogni_sensitive_filter_check.setChecked(True)
         self.duration_mode_combo = QComboBox()
@@ -1637,11 +1638,16 @@ class MainWindow(QMainWindow):
         self.sogni_lora_label.setText("Sin LoRAs")
         model = self.model_combo.currentData()
         model_id = model.id if model else ""
-        self.sogni_lora_button.setEnabled(model_id.startswith(("minimax-h3-fl2va-fp8_i2v", "minimax-h3-fastvideo-int8_i2v")))
+        if not model_id.startswith(("minimax-h3-fl2va-fp8_i2v", "minimax-h3-fastvideo-int8_i2v")):
+            self.sogni_lora_label.setText("Elegí un modelo MiniMax H3 I2V")
 
     def _open_sogni_loras(self) -> None:
         model = self.model_combo.currentData()
         if not model:
+            QMessageBox.information(self, "LoRAs comunitarias", "Primero actualizá el catálogo y seleccioná un modelo MiniMax H3 de imagen a video.")
+            return
+        if not model.id.startswith(("minimax-h3-fl2va-fp8_i2v", "minimax-h3-fastvideo-int8_i2v")):
+            QMessageBox.information(self, "LoRAs comunitarias", "Las LoRAs de esta lista requieren un modelo MiniMax H3 de imagen a video.")
             return
         dialog = SogniLoraDialog(
             self.sogni, model.id, self._selected_sogni_loras, self,
