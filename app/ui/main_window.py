@@ -4,6 +4,7 @@ import base64
 import json
 import threading
 from pathlib import Path
+from urllib.parse import urlparse
 
 from app.core.campaign_manager import CampaignManager
 from app.core.model_settings import ASPECT_RATIOS, build_campaign_settings
@@ -15,6 +16,7 @@ from app.sogni.auth import ApiKeyStore
 from app.utils.paths import data_dir
 from app.wavespeed.client import WaveSpeedClient
 from app.wavespeed.history import WaveSpeedHistoryStore
+from app.wavespeed.flux_queue import FluxCampaign, FluxCampaignStore, FluxQueue, FluxQueueItem, FluxQueueRunner
 from app.wavespeed.queue import (
     QueueStatus,
     WaveSpeedCampaign,
@@ -24,10 +26,18 @@ from app.wavespeed.queue import (
 )
 from app.wavespeed.queue_runner import WaveSpeedQueueRunner
 from app.ui.wavespeed_queue import WaveSpeedQueueWidget
+from app.ui.flux_queue import FluxQueueWidget
 from app.wavespeed.validation import (
     ASPECT_RATIOS as WAVESPEED_ASPECT_RATIOS,
     RESOLUTIONS as WAVESPEED_RESOLUTIONS,
+    MODEL_ID as WAN_MODEL_ID,
+    SEEDANCE_MODEL_ID,
+    FLUX_MODEL_ID,
+    FACE_SWAP_MODEL_ID,
     build_reference_video_payload,
+    build_seedance_payload,
+    build_flux_payload,
+    build_face_swap_payload,
     validate_local_reference_file,
 )
 
@@ -77,6 +87,7 @@ class MainWindow(QMainWindow):
         wavespeed_key_store=None,
         wavespeed_campaign_store=None,
         wavespeed_queue_store=None,
+        flux_campaign_store=None,
     ) -> None:
         super().__init__()
         self.repo = repo
@@ -87,6 +98,13 @@ class MainWindow(QMainWindow):
         self.wavespeed_history = WaveSpeedHistoryStore()
         self.wavespeed_queue_store = wavespeed_queue_store or WaveSpeedQueueStore()
         self.wavespeed_campaign_store = wavespeed_campaign_store or WaveSpeedCampaignStore()
+        self.flux_campaign_store = flux_campaign_store or FluxCampaignStore()
+        self._flux_campaign_id: str | None = None
+        self._flux_campaign_name = "Nueva campaña Flux"
+        self._flux_campaign_persist_lock = threading.Lock()
+        self._flux_history_lock = threading.Lock()
+        self._flux_queue_running = False
+        self._flux_queue_active: FluxQueue | None = None
         self._wavespeed_campaign_id: str | None = None
         self._wavespeed_campaign_name = "Nueva campaña"
         self._wavespeed_campaign_persist_lock = threading.Lock()
@@ -124,6 +142,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._jobs_tab(), "Jobs")
         self.tabs.addTab(self._settings_tab(), "Settings")
         self.tabs.addTab(self._wavespeed_tab(), "WaveSpeed")
+        self.tabs.addTab(self._images_tab(), "Imágenes")
         layout.addWidget(self.tabs)
         self.setCentralWidget(root)
 
@@ -251,10 +270,17 @@ class MainWindow(QMainWindow):
         connection_form.addWidget(test_key, 1, 0)
         connection_form.addWidget(self.wavespeed_connection_label, 1, 1)
         connection_form.addWidget(self.wavespeed_balance_label, 1, 2)
-        endpoint = QLabel(f"Modelo: {self.wavespeed.MODEL_ID}\nEndpoint: {self.wavespeed.BASE_URL}/{self.wavespeed.MODEL_ID}")
+        self.wavespeed_model_combo = QComboBox()
+        self.wavespeed_model_combo.addItem("WAN 3.0 Reference-to-Video", WAN_MODEL_ID)
+        self.wavespeed_model_combo.addItem("Seedance 2.0 Text-to-Video", SEEDANCE_MODEL_ID)
+        self.wavespeed_model_combo.currentIndexChanged.connect(self._wavespeed_model_changed)
+        connection_form.addWidget(QLabel("Modelo"), 2, 0)
+        connection_form.addWidget(self.wavespeed_model_combo, 2, 1, 1, 2)
+        endpoint = QLabel()
+        self.wavespeed_endpoint_label = endpoint
         endpoint.setTextInteractionFlags(Qt.TextSelectableByMouse)
         endpoint.setWordWrap(True)
-        connection_form.addWidget(endpoint, 2, 0, 1, 3)
+        connection_form.addWidget(endpoint, 3, 0, 1, 3)
         layout.addWidget(connection)
 
         prompt_group = QGroupBox("Prompt")
@@ -268,6 +294,7 @@ class MainWindow(QMainWindow):
         references = QGroupBox("Referencias multimodales")
         references_layout = QGridLayout(references)
         self.wavespeed_reference_lists: dict[str, QListWidget] = {}
+        self.wavespeed_reference_labels: dict[str, QLabel] = {}
         reference_specs = (
             ("reference_images", "Imágenes (0/10)", "Images (*.png *.jpg *.jpeg *.webp *.gif)"),
             ("reference_videos", "Videos (0/5)", "Videos (*.mp4 *.mov)"),
@@ -281,7 +308,9 @@ class MainWindow(QMainWindow):
             list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
             list_widget.setMinimumHeight(95)
             self.wavespeed_reference_lists[kind] = list_widget
-            box_layout.addWidget(QLabel(label))
+            count_label = QLabel(label)
+            self.wavespeed_reference_labels[kind] = count_label
+            box_layout.addWidget(count_label)
             box_layout.addWidget(list_widget)
             buttons = QHBoxLayout()
             add = QPushButton("Agregar")
@@ -294,7 +323,7 @@ class MainWindow(QMainWindow):
             references_layout.addWidget(box, 0, column)
         layout.addWidget(references)
 
-        parameters = QGroupBox("Wan 3.0 Reference-to-Video · parámetros")
+        parameters = QGroupBox("Parámetros del modelo")
         parameters_form = QGridLayout(parameters)
         self.wavespeed_resolution_combo = QComboBox()
         self.wavespeed_resolution_combo.addItems(list(WAVESPEED_RESOLUTIONS))
@@ -409,8 +438,8 @@ class MainWindow(QMainWindow):
         self._load_wavespeed_campaigns()
         layout.addWidget(self.wavespeed_queue_widget)
 
-        self.wavespeed_history_table = QTableWidget(0, 5)
-        self.wavespeed_history_table.setHorizontalHeaderLabels(["Task", "Estado", "Archivo", "Creado", "Error"])
+        self.wavespeed_history_table = QTableWidget(0, 6)
+        self.wavespeed_history_table.setHorizontalHeaderLabels(["Task", "Modelo", "Estado", "Archivo", "Creado", "Error"])
         self.wavespeed_history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(QLabel("Historial local WaveSpeed"))
         layout.addWidget(self.wavespeed_history_table)
@@ -419,11 +448,591 @@ class MainWindow(QMainWindow):
         outer.addWidget(scroll)
         self._wavespeed_refresh_history()
         self._wavespeed_update_advanced_controls()
+        self._wavespeed_model_changed()
         return page
+
+    def _wavespeed_model_changed(self) -> None:
+        seedance = self.wavespeed_model_combo.currentData() == SEEDANCE_MODEL_ID
+        model_id = SEEDANCE_MODEL_ID if seedance else WAN_MODEL_ID
+        self.wavespeed_endpoint_label.setText(f"Modelo: {model_id}\nEndpoint: {self.wavespeed.BASE_URL}/{model_id}")
+        resolution = self.wavespeed_resolution_combo.currentText()
+        aspect = self.wavespeed_aspect_combo.currentText()
+        self.wavespeed_resolution_combo.clear()
+        self.wavespeed_resolution_combo.addItems([*WAVESPEED_RESOLUTIONS, *(["4k"] if seedance else [])])
+        self.wavespeed_resolution_combo.setCurrentText(resolution if self.wavespeed_resolution_combo.findText(resolution) >= 0 else "720p")
+        self.wavespeed_aspect_combo.clear()
+        self.wavespeed_aspect_combo.addItems([*WAVESPEED_ASPECT_RATIOS, *(["21:9"] if seedance else [])])
+        self.wavespeed_aspect_combo.setCurrentText(aspect if self.wavespeed_aspect_combo.findText(aspect) >= 0 else "16:9")
+        self.wavespeed_duration_spin.setRange(4 if seedance else 2, 15 if seedance else 30)
+        for kind, title, limit in (("reference_images", "Imágenes", 9 if seedance else 10),
+                                   ("reference_videos", "Videos", 3 if seedance else 5),
+                                   ("reference_audios", "Audios", 3 if seedance else 5)):
+            self.wavespeed_reference_labels[kind].setText(
+                f"{title} ({self.wavespeed_reference_lists[kind].count()}/{limit})")
+        self.wavespeed_prompt_expansion_check.setText("enable_web_search" if seedance else "enable_prompt_expansion")
+        self.wavespeed_audio_check.setText("generate_audio" if seedance else "enable_audio")
+        self.wavespeed_random_seed_check.setVisible(not seedance)
+        self.wavespeed_seed_spin.setVisible(not seedance)
+        self.wavespeed_sync_check.setVisible(not seedance)
+        self.wavespeed_base64_check.setVisible(not seedance)
+        self.wavespeed_status_label.setText("Listo. Seedance acepta solo texto o referencias." if seedance else "Listo. Agregá al menos una referencia.")
+
+    def _images_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        image_tabs = QTabWidget()
+        image_tabs.addTab(self._face_swap_tab(), "Face Swap")
+        image_tabs.addTab(self._flux_tab(), "Flux Edit")
+        layout.addWidget(image_tabs)
+        return page
+
+    def _face_swap_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel(
+            "Reemplaza solo el rostro de la imagen objetivo. No usa prompt ni regenera el encuadre."
+        ))
+        self.face_swap_target_edit = QLineEdit()
+        self.face_swap_target_edit.setPlaceholderText("Frame objetivo: se conserva completo salvo el rostro")
+        target_button = QPushButton("Elegir frame objetivo")
+        target_button.clicked.connect(lambda: self._face_swap_choose_image(self.face_swap_target_edit))
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("Imagen objetivo"))
+        target_row.addWidget(self.face_swap_target_edit)
+        target_row.addWidget(target_button)
+        layout.addLayout(target_row)
+        self.face_swap_identity_edit = QLineEdit()
+        self.face_swap_identity_edit.setPlaceholderText("Retrato frontal limpio de la identidad fuente")
+        identity_button = QPushButton("Elegir rostro fuente")
+        identity_button.clicked.connect(lambda: self._face_swap_choose_image(self.face_swap_identity_edit))
+        identity_row = QHBoxLayout()
+        identity_row.addWidget(QLabel("Rostro fuente"))
+        identity_row.addWidget(self.face_swap_identity_edit)
+        identity_row.addWidget(identity_button)
+        layout.addLayout(identity_row)
+        options = QGridLayout()
+        self.face_swap_target_index = QSpinBox()
+        self.face_swap_target_index.setRange(0, 10)
+        self.face_swap_gender_combo = QComboBox()
+        self.face_swap_gender_combo.addItem("Mujer", "female")
+        self.face_swap_gender_combo.addItem("Todos", "all")
+        self.face_swap_gender_combo.addItem("Hombre", "male")
+        self.face_swap_format_combo = QComboBox()
+        self.face_swap_format_combo.addItems(["png", "jpeg", "webp"])
+        options.addWidget(QLabel("Rostro objetivo (0 = rostro más grande)"), 0, 0)
+        options.addWidget(self.face_swap_target_index, 0, 1)
+        options.addWidget(QLabel("Género objetivo"), 1, 0)
+        options.addWidget(self.face_swap_gender_combo, 1, 1)
+        options.addWidget(QLabel("Formato"), 2, 0)
+        options.addWidget(self.face_swap_format_combo, 2, 1)
+        layout.addLayout(options)
+        self.face_swap_output_edit = QLineEdit(str(data_dir() / "wavespeed_outputs"))
+        output_button = QPushButton("Carpeta")
+        output_button.clicked.connect(lambda: self._face_swap_choose_output(self.face_swap_output_edit))
+        output_row = QHBoxLayout()
+        output_row.addWidget(QLabel("Salida"))
+        output_row.addWidget(self.face_swap_output_edit)
+        output_row.addWidget(output_button)
+        layout.addLayout(output_row)
+        self.face_swap_generate_button = QPushButton("Generar Face Swap")
+        self.face_swap_generate_button.clicked.connect(self._face_swap_generate)
+        layout.addWidget(self.face_swap_generate_button)
+        self.face_swap_status_label = QLabel("Listo. Elegí el frame y un retrato frontal de la identidad.")
+        layout.addWidget(self.face_swap_status_label)
+        self.face_swap_raw_edit = QTextEdit()
+        self.face_swap_raw_edit.setReadOnly(True)
+        layout.addWidget(self.face_swap_raw_edit)
+        layout.addStretch()
+        return page
+
+    def _flux_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel(f"{FLUX_MODEL_ID} · edición de 1 a 3 imágenes con la clave WaveSpeed guardada"))
+        self.flux_prompt_edit = QTextEdit()
+        self.flux_prompt_edit.setPlaceholderText("Describe la edición. Usa image1, image2, image3 para referirte a las entradas.")
+        layout.addWidget(QLabel("Prompt"))
+        layout.addWidget(self.flux_prompt_edit)
+        self.flux_images = QListWidget()
+        self.flux_images.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        layout.addWidget(QLabel("Imágenes de entrada (1–3)"))
+        layout.addWidget(self.flux_images)
+        image_buttons = QHBoxLayout()
+        add = QPushButton("Agregar imágenes")
+        add.clicked.connect(self._flux_add_images)
+        remove = QPushButton("Quitar seleccionadas")
+        remove.clicked.connect(self._flux_remove_images)
+        move_up = QPushButton("↑")
+        move_up.setToolTip("Subir la imagen seleccionada: pasa a ser image1/image2 antes")
+        move_up.clicked.connect(lambda: self._flux_move_image(-1))
+        move_down = QPushButton("↓")
+        move_down.setToolTip("Bajar la imagen seleccionada: pasa a ser image2/image3 después")
+        move_down.clicked.connect(lambda: self._flux_move_image(1))
+        image_buttons.addWidget(add)
+        image_buttons.addWidget(remove)
+        image_buttons.addWidget(move_up)
+        image_buttons.addWidget(move_down)
+        layout.addLayout(image_buttons)
+        options = QGridLayout()
+        self.flux_size_edit = QLineEdit()
+        self.flux_size_edit.setPlaceholderText("Vacío = tamaño de entrada; ej. 1024*1024")
+        self.flux_random_seed_check = QCheckBox("Seed aleatorio (-1)")
+        self.flux_random_seed_check.setChecked(True)
+        self.flux_seed_spin = QSpinBox()
+        self.flux_seed_spin.setRange(0, 2_147_483_647)
+        self.flux_seed_spin.setDisabled(True)
+        self.flux_random_seed_check.toggled.connect(self.flux_seed_spin.setDisabled)
+        self.flux_sync_check = QCheckBox("enable_sync_mode")
+        self.flux_base64_check = QCheckBox("enable_base64_output")
+        options.addWidget(QLabel("Size"), 0, 0)
+        options.addWidget(self.flux_size_edit, 0, 1)
+        options.addWidget(self.flux_random_seed_check, 1, 0)
+        options.addWidget(self.flux_seed_spin, 1, 1)
+        options.addWidget(self.flux_sync_check, 2, 0)
+        options.addWidget(self.flux_base64_check, 2, 1)
+        layout.addLayout(options)
+        output = QHBoxLayout()
+        self.flux_output_edit = QLineEdit(str(data_dir() / "wavespeed_outputs"))
+        choose = QPushButton("Carpeta")
+        choose.clicked.connect(self._flux_choose_output)
+        output.addWidget(QLabel("Output"))
+        output.addWidget(self.flux_output_edit)
+        output.addWidget(choose)
+        layout.addLayout(output)
+        controls = QHBoxLayout()
+        self.flux_price_label = QLabel("Precio: no estimado")
+        estimate = QPushButton("Estimar precio")
+        estimate.clicked.connect(self._flux_estimate_price)
+        self.flux_generate_button = QPushButton("Generar imagen")
+        self.flux_generate_button.clicked.connect(self._flux_generate)
+        self.flux_queue_add_button = QPushButton("Agregar a la cola")
+        self.flux_queue_add_button.clicked.connect(self._flux_add_current_to_queue)
+        controls.addWidget(estimate)
+        controls.addWidget(self.flux_price_label)
+        controls.addWidget(self.flux_generate_button)
+        controls.addWidget(self.flux_queue_add_button)
+        layout.addLayout(controls)
+        self.flux_status_label = QLabel("Listo.")
+        layout.addWidget(self.flux_status_label)
+        self.flux_task_edit = QLineEdit()
+        self.flux_task_edit.setPlaceholderText("Task ID para consultar")
+        query = QPushButton("Consultar tarea")
+        query.clicked.connect(self._flux_query_task)
+        task_row = QHBoxLayout()
+        task_row.addWidget(self.flux_task_edit)
+        task_row.addWidget(query)
+        layout.addLayout(task_row)
+        self.flux_raw_edit = QTextEdit()
+        self.flux_raw_edit.setReadOnly(True)
+        layout.addWidget(self.flux_raw_edit)
+        self.flux_queue_widget = FluxQueueWidget()
+        self.flux_queue_widget.queue_changed.connect(self._save_flux_queue)
+        self.flux_queue_widget.campaign_selected.connect(self._select_flux_campaign)
+        self.flux_queue_widget.new_campaign_requested.connect(self._new_flux_campaign)
+        self.flux_queue_widget.save_campaign_requested.connect(self._save_flux_queue)
+        self.flux_queue_widget.delete_campaign_requested.connect(self._delete_flux_campaign)
+        self.flux_queue_widget.start_requested.connect(self._start_flux_queue)
+        self.flux_queue_widget.pause_requested.connect(self._pause_flux_queue)
+        self.flux_queue_widget.retry_requested.connect(self._retry_flux_item)
+        self.flux_queue_widget.retry_failed_requested.connect(self._retry_flux_failed)
+        self.flux_queue_widget.clear_completed_requested.connect(self._clear_flux_completed)
+        self.flux_queue_widget.estimate_requested.connect(self._estimate_flux_queue_prices)
+        layout.addWidget(self.flux_queue_widget)
+        self._load_flux_campaigns()
+        return page
+
+    def _flux_add_images(self) -> None:
+        selected, _ = QFileDialog.getOpenFileNames(self, "Seleccionar imágenes", filter="Images (*.png *.jpg *.jpeg *.webp *.gif)")
+        existing = {self.flux_images.item(i).data(Qt.UserRole) for i in range(self.flux_images.count())}
+        for name in selected:
+            path = str(Path(name).resolve())
+            if path in existing or self.flux_images.count() >= 3:
+                continue
+            item = QListWidgetItem(Path(path).name)
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            self.flux_images.addItem(item)
+            existing.add(path)
+
+    def _flux_remove_images(self) -> None:
+        for item in self.flux_images.selectedItems():
+            self.flux_images.takeItem(self.flux_images.row(item))
+
+    def _flux_move_image(self, direction: int) -> None:
+        source = self.flux_images.currentRow()
+        destination = source + direction
+        if source < 0 or not 0 <= destination < self.flux_images.count():
+            return
+        item = self.flux_images.takeItem(source)
+        self.flux_images.insertItem(destination, item)
+        self.flux_images.setCurrentRow(destination)
+
+    def _flux_choose_output(self) -> None:
+        selected = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta de salida")
+        if selected:
+            self.flux_output_edit.setText(selected)
+
+    def _face_swap_choose_image(self, edit: QLineEdit) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar imagen", filter="Images (*.png *.jpg *.jpeg *.webp *.gif)"
+        )
+        if selected:
+            edit.setText(str(Path(selected).resolve()))
+
+    def _face_swap_choose_output(self, edit: QLineEdit) -> None:
+        selected = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta de salida")
+        if selected:
+            edit.setText(selected)
+
+    def _face_swap_snapshot(self) -> dict:
+        return {
+            "image": self.face_swap_target_edit.text().strip(),
+            "face_image": self.face_swap_identity_edit.text().strip(),
+            "target_index": self.face_swap_target_index.value(),
+            "target_gender": self.face_swap_gender_combo.currentData(),
+            "output_format": self.face_swap_format_combo.currentText(),
+            "enable_sync_mode": False,
+            "enable_base64_output": False,
+            "output_dir": self.face_swap_output_edit.text().strip(),
+        }
+
+    def _face_swap_upload_and_build(self, snapshot: dict) -> dict:
+        build_face_swap_payload(**{key: snapshot[key] for key in (
+            "image", "face_image", "target_index", "target_gender", "output_format",
+            "enable_sync_mode", "enable_base64_output",
+        )})
+        target = Path(snapshot["image"])
+        identity = Path(snapshot["face_image"])
+        validate_local_reference_file(target, "reference_images")
+        validate_local_reference_file(identity, "reference_images")
+        return build_face_swap_payload(
+            image=self._wavespeed_upload_cached(target)["download_url"],
+            face_image=self._wavespeed_upload_cached(identity)["download_url"],
+            target_index=snapshot["target_index"], target_gender=snapshot["target_gender"],
+            output_format=snapshot["output_format"],
+        )
+
+    def _face_swap_generate(self) -> None:
+        snapshot = self._face_swap_snapshot()
+        self.face_swap_generate_button.setEnabled(False)
+        self.face_swap_status_label.setText("Preparando Face Swap...")
+
+        def task():
+            payload = self._face_swap_upload_and_build(snapshot)
+            prediction = self.wavespeed.submit(payload, model_id=FACE_SWAP_MODEL_ID)
+            if prediction.status not in {"completed", "failed", "cancelled", "timeout", "deleted"}:
+                prediction = self.wavespeed.poll_result(prediction.id)
+            output_file = ""
+            if prediction.status == "completed" and prediction.outputs:
+                output_file = self._wavespeed_save_output(
+                    prediction.outputs[0], snapshot, prediction.id, suffix=f".{snapshot['output_format']}"
+                )
+            self.wavespeed_history.add({
+                "task_id": prediction.id, "model_id": FACE_SWAP_MODEL_ID, "status": prediction.status,
+                "output_file": output_file, "error": prediction.error, "payload": payload,
+                "created_at": prediction.created_at,
+            })
+            return {"prediction": prediction, "output_file": output_file}
+
+        self._run_wavespeed_worker(task, "face_swap_generate")
+
+    def _flux_snapshot(self) -> dict:
+        return {
+            "prompt": self.flux_prompt_edit.toPlainText(),
+            "images": [self.flux_images.item(i).data(Qt.UserRole) for i in range(self.flux_images.count())],
+            "size": self.flux_size_edit.text().strip(),
+            "seed": -1 if self.flux_random_seed_check.isChecked() else self.flux_seed_spin.value(),
+            "enable_sync_mode": self.flux_sync_check.isChecked(),
+            "enable_base64_output": self.flux_base64_check.isChecked(),
+            "output_dir": self.flux_output_edit.text().strip(),
+        }
+
+    def _flux_upload_and_build(self, snapshot: dict) -> dict:
+        # Validate before any upload or paid submission.
+        build_flux_payload(**{key: snapshot[key] for key in
+                              ("prompt", "images", "size", "seed", "enable_sync_mode", "enable_base64_output")})
+        urls = []
+        for name in snapshot["images"]:
+            validate_local_reference_file(Path(name), "reference_images")
+            urls.append(self._wavespeed_upload_cached(Path(name))["download_url"])
+        return build_flux_payload(prompt=snapshot["prompt"], images=urls, size=snapshot["size"],
+                                  seed=snapshot["seed"], enable_sync_mode=snapshot["enable_sync_mode"],
+                                  enable_base64_output=snapshot["enable_base64_output"])
+
+    def _flux_estimate_price(self) -> None:
+        snapshot = self._flux_snapshot()
+        self.flux_price_label.setText("Calculando...")
+        self._run_wavespeed_worker(lambda: self.wavespeed.estimate_price(
+            self._flux_upload_and_build(snapshot), model_id=FLUX_MODEL_ID), "flux_price")
+
+    def _flux_generate(self) -> None:
+        snapshot = self._flux_snapshot()
+        self.flux_generate_button.setEnabled(False)
+        self.flux_status_label.setText("Preparando generación...")
+
+        def task():
+            payload = self._flux_upload_and_build(snapshot)
+            prediction = self.wavespeed.submit(payload, model_id=FLUX_MODEL_ID)
+            if prediction.status not in {"completed", "failed", "cancelled", "timeout", "deleted"}:
+                prediction = self.wavespeed.poll_result(prediction.id)
+            output_file = ""
+            if prediction.status == "completed" and prediction.outputs:
+                output_file = self._wavespeed_save_output(prediction.outputs[0], snapshot, prediction.id, suffix=".png")
+            self.wavespeed_history.add({"task_id": prediction.id, "model_id": FLUX_MODEL_ID,
+                                        "status": prediction.status, "output_file": output_file,
+                                        "error": prediction.error, "payload": payload,
+                                        "created_at": prediction.created_at})
+            return {"prediction": prediction, "output_file": output_file}
+
+        self._run_wavespeed_worker(task, "flux_generate")
+
+    def _flux_query_task(self) -> None:
+        task_id = self.flux_task_edit.text().strip()
+        if task_id:
+            self._run_wavespeed_worker(lambda: self.wavespeed.get_result(task_id), "flux_query")
+
+    def _load_flux_campaigns(self) -> None:
+        try:
+            campaigns, active_id = self.flux_campaign_store.load()
+        except ValueError as exc:
+            self.flux_queue_widget.status_label.setText(f"Error: {exc}")
+            return
+        self.flux_queue_widget.set_campaigns(campaigns, active_id)
+        if campaigns:
+            self._select_flux_campaign(active_id or campaigns[0].campaign_id)
+        else:
+            self._flux_campaign_id = None
+            self._flux_campaign_name = "Nueva campaña Flux"
+            self.flux_queue_widget.campaign_name_edit.setText(self._flux_campaign_name)
+            self.flux_queue_widget.load_queue(FluxQueue())
+
+    def _select_flux_campaign(self, campaign_id: str) -> None:
+        if not campaign_id or self._flux_queue_running:
+            return
+        if self._flux_campaign_id and self._flux_campaign_id != campaign_id:
+            if not self._save_flux_queue():
+                return
+        try:
+            campaigns, active_id = self.flux_campaign_store.load()
+        except ValueError as exc:
+            self.flux_queue_widget.status_label.setText(f"Error: {exc}")
+            return
+        campaign = next((row for row in campaigns if row.campaign_id == campaign_id), None)
+        if campaign is None:
+            return
+        if active_id != campaign_id:
+            self.flux_campaign_store.save(campaign, active=True)
+        self._flux_campaign_id = campaign.campaign_id
+        self._flux_campaign_name = campaign.name
+        campaigns, _ = self.flux_campaign_store.load()
+        self.flux_queue_widget.set_campaigns(campaigns, campaign.campaign_id)
+        self.flux_queue_widget.campaign_name_edit.setText(campaign.name)
+        self.flux_queue_widget.load_queue(campaign.queue)
+        self.flux_output_edit.setText(campaign.queue.output_dir or str(data_dir() / "wavespeed_outputs"))
+
+    def _save_flux_queue(self) -> bool:
+        if self._flux_queue_running or not hasattr(self, "flux_queue_widget"):
+            return False
+        name = self.flux_queue_widget.campaign_name_edit.text().strip() or "Nueva campaña Flux"
+        campaign = FluxCampaign(campaign_id=self._flux_campaign_id or FluxCampaign().campaign_id,
+                                name=name, queue=self.flux_queue_widget.queue())
+        try:
+            self.flux_campaign_store.save(campaign, active=True)
+        except ValueError as exc:
+            self.flux_queue_widget.status_label.setText(f"Error: {exc}")
+            return False
+        self._flux_campaign_id = campaign.campaign_id
+        self._flux_campaign_name = name
+        campaigns, _ = self.flux_campaign_store.load()
+        self.flux_queue_widget.set_campaigns(campaigns, campaign.campaign_id)
+        return True
+
+    def _persist_flux_campaign_queue(self, queue: FluxQueue) -> None:
+        if not self._flux_campaign_id:
+            return
+        with self._flux_campaign_persist_lock:
+            campaign = FluxCampaign(campaign_id=self._flux_campaign_id,
+                                    name=self._flux_campaign_name, queue=queue)
+            self.flux_campaign_store.save(campaign, active=True)
+
+    def _new_flux_campaign(self) -> None:
+        if self._flux_queue_running:
+            return
+        if self._flux_campaign_id:
+            if not self._save_flux_queue():
+                return
+        campaign = FluxCampaign()
+        try:
+            self.flux_campaign_store.save(campaign, active=True)
+        except ValueError as exc:
+            self.flux_queue_widget.status_label.setText(f"Error: {exc}")
+            return
+        self._load_flux_campaigns()
+
+    def _delete_flux_campaign(self) -> None:
+        if self._flux_queue_running or not self._flux_campaign_id:
+            return
+        try:
+            self.flux_campaign_store.delete(self._flux_campaign_id)
+        except ValueError as exc:
+            self.flux_queue_widget.status_label.setText(f"Error: {exc}")
+            return
+        self._flux_campaign_id = None
+        self._load_flux_campaigns()
+
+    def _flux_add_current_to_queue(self) -> None:
+        if self._flux_queue_running:
+            return
+        snapshot = self._flux_snapshot()
+        try:
+            build_flux_payload(**{key: snapshot[key] for key in
+                                  ("prompt", "images", "size", "seed", "enable_sync_mode", "enable_base64_output")})
+            for name in snapshot["images"]:
+                validate_local_reference_file(Path(name), "reference_images")
+        except Exception as exc:
+            self.flux_queue_widget.status_label.setText(f"Error: {exc}")
+            return
+        queue = self.flux_queue_widget.queue()
+        queue.items.append(FluxQueueItem(prompt=snapshot["prompt"], image_paths=list(snapshot["images"]),
+                                         size=snapshot["size"], seed=snapshot["seed"],
+                                         enable_sync_mode=snapshot["enable_sync_mode"],
+                                         enable_base64_output=snapshot["enable_base64_output"]))
+        queue.output_dir = snapshot["output_dir"]
+        self.flux_queue_widget.load_queue(queue)
+        if self._save_flux_queue():
+            self.flux_queue_widget.status_label.setText(f"{len(queue.items)} ítem(s) en cola.")
+
+    @staticmethod
+    def _validate_flux_queue(queue: FluxQueue) -> None:
+        if not queue.items:
+            raise ValueError("Agregá al menos una edición a la cola.")
+        for item in queue.items:
+            if item.task_id:
+                continue
+            build_flux_payload(prompt=item.prompt, images=item.image_paths, size=item.size, seed=item.seed,
+                               enable_sync_mode=item.enable_sync_mode,
+                               enable_base64_output=item.enable_base64_output)
+            for name in item.image_paths:
+                validate_local_reference_file(Path(name), "reference_images")
+
+    def _start_flux_queue(self) -> None:
+        if self._flux_queue_running:
+            return
+        queue = self.flux_queue_widget.queue()
+        try:
+            self._validate_flux_queue(queue)
+        except Exception as exc:
+            self.flux_queue_widget.status_label.setText(f"Error: {exc}")
+            return
+        if not self._flux_campaign_id and not self._save_flux_queue():
+            return
+        queue.paused = False
+        try:
+            self._persist_flux_campaign_queue(queue)
+        except Exception as exc:
+            self.flux_queue_widget.status_label.setText(f"Error al guardar la cola: {exc}")
+            return
+        self._flux_queue_running = True
+        self._flux_queue_active = queue
+        self.flux_queue_widget.set_running(True)
+        self.flux_queue_add_button.setEnabled(False)
+        self.flux_queue_widget.status_label.setText("Cola Flux iniciada.")
+        threading.Thread(target=self._run_flux_queue, args=(queue,), daemon=True).start()
+
+    def _run_flux_queue(self, queue: FluxQueue) -> None:
+        runner = FluxQueueRunner(
+            self.wavespeed, upload_file=self._wavespeed_upload_cached,
+            save_output=lambda output, output_dir, task_id: self._wavespeed_save_output(
+                output, {"output_dir": output_dir}, task_id, suffix=".png"),
+            on_update=lambda item: self._flux_queue_item_update(queue, item),
+        )
+        error = None
+        try:
+            runner.run(queue)
+        except Exception as exc:
+            error = exc
+        finally:
+            self._persist_flux_campaign_queue(queue)
+            self._post_wavespeed_event("flux_queue_finished", error)
+
+    def _flux_queue_item_update(self, queue: FluxQueue, item: FluxQueueItem) -> None:
+        self._persist_flux_campaign_queue(queue)
+        if item.task_id and item.status in {QueueStatus.COMPLETED, QueueStatus.FAILED}:
+            with self._flux_history_lock:
+                self.wavespeed_history.add({
+                    "task_id": item.task_id, "model_id": FLUX_MODEL_ID, "status": item.status,
+                    "output_file": item.output_file, "error": item.error,
+                    "payload": {"prompt": item.prompt, "image_paths": item.image_paths,
+                                "size": item.size, "seed": item.seed},
+                    "created_at": item.created_at,
+                })
+        self._post_wavespeed_event("flux_queue_item", item)
+
+    def _pause_flux_queue(self) -> None:
+        if not self._flux_queue_running or self._flux_queue_active is None:
+            return
+        self._flux_queue_active.paused = True
+        self._persist_flux_campaign_queue(self._flux_queue_active)
+        self.flux_queue_widget.status_label.setText("Se pausará después de los ítems en curso.")
+
+    def _retry_flux_item(self, item_id: str) -> None:
+        if self._flux_queue_running:
+            return
+        queue = self.flux_queue_widget.queue()
+        item = next((row for row in queue.items if row.item_id == item_id), None)
+        if item is None or item.status == QueueStatus.RUNNING:
+            return
+        item.retry()
+        queue.paused = False
+        self.flux_queue_widget.set_item_update(item)
+        self._persist_flux_campaign_queue(queue)
+        self._start_flux_queue()
+
+    def _retry_flux_failed(self) -> None:
+        if self._flux_queue_running:
+            return
+        queue = self.flux_queue_widget.queue()
+        for item in queue.items:
+            if item.status == QueueStatus.FAILED:
+                item.retry()
+                self.flux_queue_widget.set_item_update(item)
+        queue.paused = False
+        self._persist_flux_campaign_queue(queue)
+        self._start_flux_queue()
+
+    def _clear_flux_completed(self) -> None:
+        if self._flux_queue_running:
+            return
+        queue = self.flux_queue_widget.queue()
+        queue.items = [item for item in queue.items if item.status != QueueStatus.COMPLETED]
+        self.flux_queue_widget.load_queue(queue)
+        self._persist_flux_campaign_queue(queue)
+
+    def _estimate_flux_queue_prices(self) -> None:
+        if self._flux_queue_running:
+            return
+        queue = self.flux_queue_widget.queue()
+        try:
+            self._validate_flux_queue(queue)
+        except Exception as exc:
+            self.flux_queue_widget.set_total_price(None, str(exc))
+            return
+        self.flux_queue_widget.estimate_button.setEnabled(False)
+        self.flux_queue_widget.total_price_label.setText("Total estimado: calculando...")
+
+        def task():
+            runner = FluxQueueRunner(self.wavespeed, upload_file=self._wavespeed_upload_cached,
+                                     save_output=lambda *_args: "",
+                                     on_update=lambda item: self._flux_queue_item_update(queue, item))
+            return runner.estimate_prices(queue)
+
+        self._run_wavespeed_worker(task, "flux_queue_prices")
 
     def _wavespeed_add_files(self, kind: str, file_filter: str) -> None:
         selected, _ = QFileDialog.getOpenFileNames(self, "Seleccionar referencias", filter=file_filter)
-        limits = {"reference_images": 10, "reference_videos": 5, "reference_audios": 5}
+        limits = ({"reference_images": 9, "reference_videos": 3, "reference_audios": 3}
+                  if self.wavespeed_model_combo.currentData() == SEEDANCE_MODEL_ID else
+                  {"reference_images": 10, "reference_videos": 5, "reference_audios": 5})
         widget = self.wavespeed_reference_lists[kind]
         existing = {widget.item(index).data(Qt.UserRole) for index in range(widget.count())}
         for selected_path in selected:
@@ -436,6 +1045,8 @@ class MainWindow(QMainWindow):
             widget.addItem(item)
             existing.add(path)
         self.wavespeed_status_label.setText(f"{widget.count()}/{limits[kind]} referencias en {kind}.")
+        title = {"reference_images": "Imágenes", "reference_videos": "Videos", "reference_audios": "Audios"}[kind]
+        self.wavespeed_reference_labels[kind].setText(f"{title} ({widget.count()}/{limits[kind]})")
 
     def _wavespeed_add_current_to_queue(self) -> None:
         image_paths = [
@@ -479,6 +1090,7 @@ class MainWindow(QMainWindow):
                     enable_prompt_expansion=snapshot["enable_prompt_expansion"],
                     enable_audio=snapshot["enable_audio"],
                     seed=snapshot["seed"],
+                    model_id=snapshot["model_id"],
                 )
             )
             existing_videos.add(str(Path(video_path).resolve()).casefold())
@@ -493,6 +1105,7 @@ class MainWindow(QMainWindow):
         widget = self.wavespeed_reference_lists[kind]
         for item in widget.selectedItems():
             widget.takeItem(widget.row(item))
+        self._wavespeed_model_changed()
 
     def _wavespeed_choose_output(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta de salida")
@@ -519,6 +1132,7 @@ class MainWindow(QMainWindow):
             return [str(widget.item(index).data(Qt.UserRole)) for index in range(widget.count())]
 
         return {
+            "model_id": self.wavespeed_model_combo.currentData(),
             "prompt": self.wavespeed_prompt_edit.toPlainText(),
             "reference_images": paths("reference_images"),
             "reference_videos": paths("reference_videos"),
@@ -536,6 +1150,12 @@ class MainWindow(QMainWindow):
         }
 
     def _wavespeed_upload_and_build(self, snapshot: dict) -> tuple[dict, dict[str, dict]]:
+        if snapshot["model_id"] == SEEDANCE_MODEL_ID:
+            build_seedance_payload(prompt=snapshot["prompt"],
+                reference_images=snapshot["reference_images"], reference_videos=snapshot["reference_videos"],
+                reference_audios=snapshot["reference_audios"], resolution=snapshot["resolution"],
+                aspect_ratio=snapshot["aspect_ratio"], duration=snapshot["duration"],
+                enable_web_search=snapshot["enable_prompt_expansion"], generate_audio=snapshot["enable_audio"])
         uploaded: dict[str, dict] = {}
         for kind in ("reference_images", "reference_videos", "reference_audios"):
             urls = []
@@ -552,20 +1172,18 @@ class MainWindow(QMainWindow):
                 uploaded[cache_key] = media
                 urls.append(media["download_url"])
             snapshot[kind] = urls
-        payload = build_reference_video_payload(
-            prompt=snapshot["prompt"],
-            reference_images=snapshot["reference_images"],
-            reference_videos=snapshot["reference_videos"],
-            reference_audios=snapshot["reference_audios"],
-            resolution=snapshot["resolution"],
-            aspect_ratio=snapshot["aspect_ratio"],
-            duration=snapshot["duration"],
-            enable_prompt_expansion=snapshot["enable_prompt_expansion"],
-            enable_audio=snapshot["enable_audio"],
-            seed=snapshot["seed"],
-            enable_sync_mode=snapshot["enable_sync_mode"],
-            enable_base64_output=snapshot["enable_base64_output"],
-        )
+        common = dict(prompt=snapshot["prompt"], reference_images=snapshot["reference_images"],
+                      reference_videos=snapshot["reference_videos"], reference_audios=snapshot["reference_audios"],
+                      resolution=snapshot["resolution"], aspect_ratio=snapshot["aspect_ratio"],
+                      duration=snapshot["duration"])
+        if snapshot["model_id"] == SEEDANCE_MODEL_ID:
+            payload = build_seedance_payload(**common,
+                enable_web_search=snapshot["enable_prompt_expansion"], generate_audio=snapshot["enable_audio"])
+        else:
+            payload = build_reference_video_payload(**common,
+                enable_prompt_expansion=snapshot["enable_prompt_expansion"], enable_audio=snapshot["enable_audio"],
+                seed=snapshot["seed"], enable_sync_mode=snapshot["enable_sync_mode"],
+                enable_base64_output=snapshot["enable_base64_output"])
         return payload, uploaded
 
     def _wavespeed_generate(self) -> None:
@@ -575,7 +1193,8 @@ class MainWindow(QMainWindow):
 
         def task():
             payload, _uploaded = self._wavespeed_upload_and_build(snapshot)
-            prediction = self.wavespeed.submit(payload, webhook_url=snapshot["webhook_url"] or None)
+            prediction = self.wavespeed.submit(payload, webhook_url=snapshot["webhook_url"] or None,
+                                               model_id=snapshot["model_id"])
             self._post_wavespeed_event("status", f"Task {prediction.id} creado ({prediction.status}).")
             if prediction.status not in {"completed", "failed", "cancelled", "timeout", "deleted"} and not snapshot["webhook_url"]:
                 prediction = self.wavespeed.poll_result(
@@ -592,15 +1211,20 @@ class MainWindow(QMainWindow):
                 "output_file": output_file,
                 "error": prediction.error,
                 "payload": payload,
+                "model_id": snapshot["model_id"],
                 "created_at": prediction.created_at,
             })
             return {"prediction": prediction, "output_file": output_file, "payload": payload}
 
         self._run_wavespeed_worker(task, "generate")
 
-    def _wavespeed_save_output(self, output: object, snapshot: dict, task_id: str) -> str:
+    def _wavespeed_save_output(self, output: object, snapshot: dict, task_id: str, suffix: str = ".mp4") -> str:
         output_dir = Path(snapshot["output_dir"] or data_dir() / "wavespeed_outputs")
-        destination = output_dir / f"wavespeed_{task_id}.mp4"
+        if suffix == ".png" and isinstance(output, str) and output.startswith(("http://", "https://")):
+            remote_suffix = Path(urlparse(output).path).suffix.lower()
+            if remote_suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+                suffix = remote_suffix
+        destination = output_dir / f"wavespeed_{task_id}{suffix}"
         if isinstance(output, str) and output.startswith(("http://", "https://")):
             return str(self.wavespeed.download_output(output, destination))
         if isinstance(output, str):
@@ -744,6 +1368,13 @@ class MainWindow(QMainWindow):
             validate_local_reference_file(Path(item.video_path), "reference_videos")
             if not item.prompt.strip():
                 raise ValueError(f"El ítem {item.item_id} no tiene prompt.")
+            if item.model_id == SEEDANCE_MODEL_ID:
+                build_seedance_payload(prompt=item.prompt, reference_images=["frame"],
+                    reference_videos=["video"], resolution=item.resolution,
+                    aspect_ratio=item.aspect_ratio, duration=item.duration,
+                    enable_web_search=item.enable_prompt_expansion, generate_audio=item.enable_audio)
+            elif item.model_id != WAN_MODEL_ID:
+                raise ValueError(f"Modelo de cola no admitido: {item.model_id}")
 
     def _start_wavespeed_queue(self) -> None:
         if self._wavespeed_queue_running:
@@ -875,7 +1506,7 @@ class MainWindow(QMainWindow):
 
         def task():
             payload, _uploaded = self._wavespeed_upload_and_build(snapshot)
-            return self.wavespeed.estimate_price(payload)
+            return self.wavespeed.estimate_price(payload, model_id=snapshot["model_id"])
 
         self._run_wavespeed_worker(task, "price")
 
@@ -911,6 +1542,7 @@ class MainWindow(QMainWindow):
         for row, item in enumerate(rows):
             values = [
                 item.get("task_id", ""),
+                item.get("model_id", WAN_MODEL_ID),
                 item.get("status", ""),
                 item.get("output_file", ""),
                 item.get("created_at", ""),
@@ -1165,6 +1797,56 @@ class MainWindow(QMainWindow):
     def _handle_wavespeed_event(self, kind: str, payload) -> None:
         if kind == "status":
             self.wavespeed_status_label.setText(str(payload))
+        elif kind == "face_swap_generate":
+            self.face_swap_generate_button.setEnabled(True)
+            if isinstance(payload, Exception):
+                self.face_swap_status_label.setText(f"Error: {payload}")
+            else:
+                prediction = payload["prediction"]
+                self.face_swap_raw_edit.setPlainText(json.dumps(prediction.raw, ensure_ascii=False, indent=2))
+                message = f"{prediction.id}: {prediction.status}"
+                if payload.get("output_file"):
+                    message += f" · guardado en {payload['output_file']}"
+                self.face_swap_status_label.setText(message)
+                self._wavespeed_refresh_history()
+        elif kind == "flux_price":
+            if isinstance(payload, Exception):
+                self.flux_price_label.setText(f"Precio: error: {payload}")
+            else:
+                self.flux_price_label.setText(f"Precio estimado: ${payload.get('discounted_price', payload.get('price', '?'))} USD")
+        elif kind == "flux_generate":
+            self.flux_generate_button.setEnabled(True)
+            if isinstance(payload, Exception):
+                self.flux_status_label.setText(f"Error: {payload}")
+            else:
+                prediction = payload["prediction"]
+                self.flux_task_edit.setText(prediction.id)
+                self.flux_raw_edit.setPlainText(json.dumps(prediction.raw, ensure_ascii=False, indent=2))
+                self.flux_status_label.setText(f"{prediction.id}: {prediction.status} · {payload['output_file']}")
+                self._wavespeed_refresh_history()
+        elif kind == "flux_query":
+            if isinstance(payload, Exception):
+                self.flux_status_label.setText(f"Error: {payload}")
+            else:
+                self.flux_raw_edit.setPlainText(json.dumps(payload.raw, ensure_ascii=False, indent=2))
+                self.flux_status_label.setText(f"{payload.id}: {payload.status}")
+        elif kind == "flux_queue_item":
+            self.flux_queue_widget.set_item_update(payload)
+            if payload.status in {QueueStatus.COMPLETED, QueueStatus.FAILED}:
+                self._wavespeed_refresh_history()
+        elif kind == "flux_queue_prices":
+            self.flux_queue_widget.estimate_button.setEnabled(True)
+            if isinstance(payload, Exception):
+                self.flux_queue_widget.set_total_price(None, str(payload))
+            else:
+                self.flux_queue_widget.set_total_price(float(payload))
+        elif kind == "flux_queue_finished":
+            self._flux_queue_running = False
+            self._flux_queue_active = None
+            self.flux_queue_widget.set_running(False)
+            self.flux_queue_add_button.setEnabled(True)
+            self.flux_queue_widget.status_label.setText(
+                f"Error: {payload}" if isinstance(payload, Exception) else "Cola Flux finalizada.")
         elif kind == "generate":
             self._wavespeed_finish(payload)
         elif kind == "balance":

@@ -7,10 +7,76 @@ import pytest
 from app.wavespeed.client import WaveSpeedClient
 from app.wavespeed.history import WaveSpeedHistoryStore
 from app.wavespeed.validation import (
+    SEEDANCE_MODEL_ID,
+    FLUX_MODEL_ID,
+    FACE_SWAP_MODEL_ID,
+    build_seedance_payload,
+    build_flux_payload,
+    build_face_swap_payload,
     build_reference_video_payload,
     validate_local_reference_file,
     validate_request,
 )
+
+
+def test_seedance_accepts_text_only_and_uses_only_its_documented_fields():
+    payload = build_seedance_payload(prompt="Exact scene", duration=15, resolution="4k",
+                                     aspect_ratio="21:9", enable_web_search=True, generate_audio=False)
+    assert payload == {"prompt": "Exact scene", "resolution": "4k", "aspect_ratio": "21:9",
+                       "duration": 15, "enable_web_search": True, "generate_audio": False}
+    with pytest.raises(ValueError, match="4 to 15"):
+        build_seedance_payload(prompt="Scene", duration=16)
+    with pytest.raises(ValueError, match="at most 3 reference_videos"):
+        build_seedance_payload(prompt="Scene", reference_videos=["url"] * 4)
+
+
+def test_flux_requires_images_and_keeps_optional_size():
+    assert build_flux_payload(prompt="Edit", images=["https://cdn/image.png"], size="1024*1024", seed=7) == {
+        "prompt": "Edit", "images": ["https://cdn/image.png"], "size": "1024*1024", "seed": 7,
+        "enable_sync_mode": False, "enable_base64_output": False,
+    }
+    with pytest.raises(ValueError, match="1 to 3"):
+        build_flux_payload(prompt="Edit", images=[])
+
+
+def test_face_swap_requires_base_and_identity_images():
+    assert build_face_swap_payload(
+        image="https://cdn/target.png", face_image="https://cdn/identity.png",
+        target_index=0, target_gender="female", output_format="png",
+    ) == {
+        "image": "https://cdn/target.png", "face_image": "https://cdn/identity.png",
+        "target_index": 0, "target_gender": "female", "output_format": "png",
+        "enable_sync_mode": False, "enable_base64_output": False,
+    }
+    with pytest.raises(ValueError, match="base image"):
+        build_face_swap_payload(image="", face_image="https://cdn/identity.png")
+
+
+@pytest.mark.parametrize("model_id,payload", [
+    (SEEDANCE_MODEL_ID, {"prompt": "Scene", "duration": 5, "resolution": "720p",
+                         "aspect_ratio": "16:9", "enable_web_search": False, "generate_audio": True}),
+    (FLUX_MODEL_ID, {"prompt": "Edit", "images": ["https://cdn/image.png"], "seed": -1,
+                     "enable_sync_mode": False, "enable_base64_output": False}),
+    (FACE_SWAP_MODEL_ID, {"image": "https://cdn/target.png", "face_image": "https://cdn/identity.png",
+                          "target_index": 0, "target_gender": "female", "output_format": "png",
+                          "enable_sync_mode": False, "enable_base64_output": False}),
+])
+def test_client_uses_selected_model_for_submit_and_price(model_id, payload):
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, json.loads(request.content)))
+        if request.url.path == "/api/v3/model/price":
+            return httpx.Response(200, json={"code": 200, "data": {"price": 1}})
+        return httpx.Response(200, json={"code": 200, "data": {"id": "pred", "status": "created"}})
+
+    client = WaveSpeedClient("secret", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    client.estimate_price(payload, model_id=model_id)
+    client.submit(payload, model_id=model_id)
+    assert seen == [
+        ("/api/v3/model/price", {"model_id": model_id, "inputs": payload}),
+        (f"/api/v3/{model_id}", payload),
+    ]
 
 
 def test_validate_request_requires_reference_media_and_enforces_limits():

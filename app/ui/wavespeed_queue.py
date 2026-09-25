@@ -41,7 +41,7 @@ class WaveSpeedQueueWidget(QWidget):
         "Aspect",
         "Duration",
         "Audio",
-        "Expand",
+        "Expand / Web",
         "Seed",
         "Price",
         "Status",
@@ -49,6 +49,7 @@ class WaveSpeedQueueWidget(QWidget):
         "Output",
         "Error",
         "Retry",
+        "Model",
     )
 
     def __init__(self, parent=None) -> None:
@@ -217,6 +218,7 @@ class WaveSpeedQueueWidget(QWidget):
             11: self._text_item(""),
             12: self._text_item(""),
             13: self._text_item(""),
+            15: self._text_item("Seedance 2.0" if "seedance" in item.model_id else "WAN 3.0"),
         }
         cells[1].setData(Qt.UserRole, item.video_path)
         cells[10].setData(Qt.UserRole, item.item_id)
