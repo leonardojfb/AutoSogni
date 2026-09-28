@@ -26,6 +26,7 @@ class CampaignManager:
         filename_template: str = "{outfit}__{prompt_id}_{prompt_name}.mp4",
         organization_mode: str = "by_outfit",
         concurrency: int = 1,
+        enqueue_jobs: bool = True,
     ) -> Campaign:
         frames = validate_frames_folder(frames_folder)
         prompts = import_prompts(prompts_source)
@@ -66,11 +67,12 @@ class CampaignManager:
             for prompt in prompts
         ]
 
-        order_index = 1
-        for frame_id in frame_ids:
-            for prompt_id in prompt_ids:
-                self.repo.insert_job(campaign_id, frame_id, prompt_id, order_index, f"sva:{campaign_id}:{order_index:04d}")
-                order_index += 1
+        if enqueue_jobs:
+            order_index = 1
+            for frame_id in frame_ids:
+                for prompt_id in prompt_ids:
+                    self.repo.insert_job(campaign_id, frame_id, prompt_id, order_index, f"sva:{campaign_id}:{order_index:04d}")
+                    order_index += 1
 
         return self.repo.get_campaign(campaign_id)
 

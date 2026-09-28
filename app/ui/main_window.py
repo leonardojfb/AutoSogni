@@ -1741,6 +1741,7 @@ class MainWindow(QMainWindow):
                 filename_template=self.template_edit.text(),
                 organization_mode=self.org_combo.currentText(),
                 concurrency=self.concurrency_spin.value(),
+                enqueue_jobs=False,
             )
             self.current_campaign_id = campaign.id
             self._load_campaigns()
@@ -1764,6 +1765,21 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             QMessageBox.critical(self, "Cola Sogni", str(exc))
+
+    def _delete_sogni_queue_job(self, job_id: int) -> None:
+        campaign_id = self.current_campaign_id
+        if campaign_id is None or self._queue_running:
+            QMessageBox.warning(self, "Cola Sogni", "Pausá la cola antes de eliminar jobs.")
+            return
+        if QMessageBox.question(
+            self, "Eliminar job", f"¿Eliminar el job #{job_id} de la campaña seleccionada?"
+        ) != QMessageBox.Yes:
+            return
+        if not self.repo.delete_pending_job(campaign_id, job_id):
+            QMessageBox.warning(self, "Cola Sogni", "El job ya no está pendiente en esta campaña.")
+            self._refresh_tables()
+            return
+        self._refresh_tables()
 
     def _load_campaigns(self) -> None:
         self.campaign_combo.blockSignals(True)
@@ -1853,6 +1869,10 @@ class MainWindow(QMainWindow):
             retry = QPushButton("Reintentar")
             retry.clicked.connect(lambda checked=False, job_id=job.id: self._retry_job(job_id))
             table.setCellWidget(row, 6, retry)
+        elif job.status == "PENDING" and job.workflow_id is None:
+            delete = QPushButton("Eliminar")
+            delete.clicked.connect(lambda checked=False, job_id=job.id: self._delete_sogni_queue_job(job_id))
+            table.setCellWidget(row, 6, delete)
 
     def _set_item(self, table: QTableWidget, row: int, col: int, text: str, record_id: int, editable: bool = True) -> None:
         item = QTableWidgetItem(text)

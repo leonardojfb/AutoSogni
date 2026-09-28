@@ -78,6 +78,19 @@ class CampaignRepository:
             row = conn.execute("SELECT COUNT(*) AS count FROM jobs WHERE campaign_id = ?", (campaign_id,)).fetchone()
         return int(row["count"])
 
+    def delete_pending_job(self, campaign_id: int, job_id: int) -> bool:
+        with self.db.connect() as conn:
+            deleted = conn.execute(
+                """
+                DELETE FROM jobs
+                WHERE id = ? AND campaign_id = ? AND status = 'PENDING'
+                  AND started_at IS NULL AND workflow_id IS NULL
+                  AND artifact_url IS NULL AND output_file IS NULL
+                """,
+                (job_id, campaign_id),
+            ).rowcount
+        return deleted == 1
+
     def update_campaign_status(self, campaign_id: int, status: str) -> None:
         with self.db.connect() as conn:
             conn.execute(
