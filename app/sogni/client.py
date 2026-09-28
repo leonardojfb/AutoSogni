@@ -42,6 +42,8 @@ class SogniClient:
         "minimax-h3-fl2va-fp8_i2v": "minimax-h3-i2v",
         "minimax-h3-fl2va-fp8_i2v_balanced": "minimax-h3-i2v-balanced",
         "minimax-h3-fl2va-fp8_i2v_turbo": "minimax-h3-i2v-turbo",
+        "minimax-h3-fastvideo-int8_i2v_turbo": "minimax-h3-fasth3-i2v-turbo",
+        "minimax-h3-fastvideo-int8_i2v_turbo_2stage": "minimax-h3-fasth3-i2v-turbo-2stage",
     }
     EXTERNAL_REFERENCE_MODEL_PREFIXES = ("seedance", "happyhorse", "wan3", "wan-3")
 
@@ -89,6 +91,26 @@ class SogniClient:
         response = self._client.get(f"/v1/model-catalog/{model_id}", params={"include": "parameters"})
         response.raise_for_status()
         return ModelDescriptor.from_api(response.json().get("data", {}).get("model", {}))
+
+    def fetch_loras(self, model_id: str, include_personal: bool = False) -> list[dict[str, Any]]:
+        response = self._client.get("/v1/loras/comfy", params={"modelId": model_id})
+        response.raise_for_status()
+        rows = response.json().get("data", {}).get("loras", [])
+        if include_personal:
+            response = self._client.get("/v1/loras/personal/catalog", headers=self._headers())
+            response.raise_for_status()
+            rows += response.json().get("data", {}).get("loras", [])
+        return [row for row in rows if model_id in row.get("modelIds", [])]
+
+    def import_personal_lora(self, url: str, name: str, model_id: str, rights_confirmed: bool) -> dict[str, Any]:
+        if not rights_confirmed:
+            raise ValueError("Confirm that you have permission to use this LoRA before importing.")
+        response = self._client.post(
+            "/v1/loras/personal", headers=self._headers(),
+            json={"url": url, "name": name, "modelId": model_id, "rightsConfirmed": True},
+        )
+        response.raise_for_status()
+        return response.json().get("data", {})
 
     def start_image_to_video_workflow(
         self,
@@ -229,14 +251,14 @@ class SogniClient:
     ) -> dict[str, Any]:
         workflow_model_id = SogniClient.WORKFLOW_MODEL_ALIASES.get(model_id, model_id)
         arguments: dict[str, Any] = {"prompt": prompt, "videoModel": workflow_model_id}
-        arguments.update({key: value for key, value in settings.items() if value not in ("", None)})
+        arguments.update({key: value for key, value in settings.items() if key != "safe_content_filter" and value not in ("", None)})
 
         normalized_reference = SogniClient._normalize_media_reference(media_reference)
         tool_name = "generate_video"
-        if model_id.startswith("minimax-h3-fl2va-fp8_i2v") or workflow_model_id.startswith("minimax-h3-i2v"):
+        if model_id.startswith(("minimax-h3-fl2va-fp8_i2v", "minimax-h3-fastvideo-int8_i2v")) or workflow_model_id.startswith(("minimax-h3-i2v", "minimax-h3-fasth3-i2v")):
             tool_name = "animate_photo"
             arguments["sourceImageIndex"] = -1
-            arguments["generateAudio"] = True
+            arguments.setdefault("generateAudio", True)
             if skip_prompt_processing:
                 arguments["skipPromptProcessing"] = True
         elif normalized_reference:
@@ -255,6 +277,8 @@ class SogniClient:
         }
         if normalized_reference:
             payload["media_references"] = [normalized_reference]
+        if settings.get("safe_content_filter") is False:
+            payload["safe_content_filter"] = False
         return payload
 
     @staticmethod

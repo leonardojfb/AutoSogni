@@ -9,8 +9,8 @@ import httpx
 
 from app.wavespeed.schemas import WaveSpeedPrediction
 from app.wavespeed.validation import (
-    MODEL_ID, SEEDANCE_MODEL_ID, FLUX_MODEL_ID, TERMINAL_STATUSES,
-    build_seedance_payload, build_flux_payload, validate_request,
+    MODEL_ID, SEEDANCE_MODEL_ID, FLUX_MODEL_ID, FACE_SWAP_MODEL_ID, TERMINAL_STATUSES,
+    build_seedance_payload, build_flux_payload, build_face_swap_payload, validate_request,
 )
 
 
@@ -96,6 +96,8 @@ class WaveSpeedClient:
             build_seedance_payload(**payload)
         elif model_id == FLUX_MODEL_ID:
             build_flux_payload(**payload)
+        elif model_id == FACE_SWAP_MODEL_ID:
+            build_face_swap_payload(**payload)
         else:
             raise ValueError(f"Unsupported WaveSpeed model: {model_id}")
         if webhook_url and (payload.get("enable_sync_mode") or payload.get("enable_base64_output")):

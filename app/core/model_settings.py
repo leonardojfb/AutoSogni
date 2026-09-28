@@ -32,6 +32,8 @@ def build_campaign_settings(
     duration_seconds: str,
     aspect_ratio: str,
     skip_prompt_processing: bool = True,
+    loras: list[list[Any]] | None = None,
+    safe_content_filter: bool = True,
 ) -> dict[str, Any]:
     if duration_mode not in DURATION_MODES:
         raise ValueError("Duration mode must be auto or manual.")
@@ -49,6 +51,11 @@ def build_campaign_settings(
         settings["duration"] = duration
     settings["aspectRatio"] = aspect_ratio
     settings["skipPromptProcessing"] = bool(skip_prompt_processing)
+    if loras:
+        settings["loras"] = [item[0] for item in loras]
+        settings["loraStrengths"] = [item[1] for item in loras]
+    if not safe_content_filter:
+        settings["safe_content_filter"] = False
     return settings
 
 

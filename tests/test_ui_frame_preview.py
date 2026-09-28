@@ -2,7 +2,7 @@ from pathlib import Path
 import time
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QListWidgetItem
+from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem
 
 from app.database.db import Database
 from app.database.repositories import CampaignRepository
@@ -17,7 +17,7 @@ from app.wavespeed.queue import (
     WaveSpeedQueueItem,
     WaveSpeedQueueStore,
 )
-from app.wavespeed.validation import SEEDANCE_MODEL_ID, FLUX_MODEL_ID
+from app.wavespeed.validation import SEEDANCE_MODEL_ID, FLUX_MODEL_ID, FACE_SWAP_MODEL_ID
 from app.wavespeed.flux_queue import FluxCampaignStore
 from app.wavespeed.history import WaveSpeedHistoryStore
 from app.wavespeed.schemas import WaveSpeedPrediction
@@ -119,6 +119,42 @@ def test_seedance_and_flux_tabs_build_model_specific_payloads(tmp_path: Path):
     assert FLUX_MODEL_ID == "wavespeed-ai/flux-2-klein-9b/edit"
     assert flux_payload["images"] == ["https://cdn/image.png"]
     assert flux_payload["prompt"] == "Flux prompt"
+
+    target = tmp_path / "target.png"
+    target.write_bytes(b"target")
+    window.face_swap_target_edit.setText(str(target))
+    window.face_swap_identity_edit.setText(str(image))
+    face_swap_payload = window._face_swap_upload_and_build(window._face_swap_snapshot())
+    assert FACE_SWAP_MODEL_ID == "wavespeed-ai/image-face-swap"
+    assert face_swap_payload["image"] == "https://cdn/image.png"
+    assert face_swap_payload["face_image"] == "https://cdn/image.png"
+    assert "Imágenes" in [window.tabs.tabText(index) for index in range(window.tabs.count())]
+
+
+def test_flux_reference_images_can_be_reordered(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    window = MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "sogni-key.txt"),
+        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"),
+    )
+    for name in ("one.png", "two.png", "three.png"):
+        image = tmp_path / name
+        image.write_bytes(b"png")
+        item = QListWidgetItem(name)
+        item.setData(Qt.UserRole, str(image))
+        window.flux_images.addItem(item)
+
+    window.flux_images.setCurrentRow(1)
+    window._flux_move_image(-1)
+
+    assert [window.flux_images.item(index).text() for index in range(3)] == [
+        "two.png", "one.png", "three.png",
+    ]
+    assert window.flux_images.currentRow() == 0
 
 
 def test_flux_add_to_queue_persists_snapshot_in_its_own_campaign(tmp_path: Path):
@@ -254,6 +290,32 @@ def test_wavespeed_image_panel_exposes_add_to_queue_action(tmp_path: Path):
                         wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"))
 
     assert window.wavespeed_queue_add_button.text() == "Agregar a la cola"
+
+
+def test_campaign_panel_exposes_queue_then_sequential_start_actions(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    window = MainWindow(CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+
+    assert window.campaign_queue_add_button.text() == "Agregar a la cola"
+    assert window.start_button.text() == "Iniciar cola / Reanudar"
+
+
+def test_reference_lists_show_one_based_position_badges(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    window = MainWindow(CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+    for name in ("one.png", "two.png"):
+        item = QListWidgetItem(name)
+        item.setData(Qt.UserRole, str(tmp_path / name))
+        window.flux_images.addItem(item)
+
+    window._refresh_reference_positions(window.flux_images)
+
+    assert window.flux_images.itemWidget(window.flux_images.item(0)).findChild(QLabel, "positionBadge").text() == "#1"
+    assert window.flux_images.itemWidget(window.flux_images.item(1)).findChild(QLabel, "positionBadge").text() == "#2"
 
 
 def test_add_to_queue_groups_jobs_by_frame_name(tmp_path: Path):
