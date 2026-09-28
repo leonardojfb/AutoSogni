@@ -101,6 +101,34 @@ def test_campaign_creation_persists_full_matrix_before_running(tmp_path: Path):
     }
 
 
+def test_delete_pending_job_is_scoped_and_rejects_started_jobs(tmp_path: Path):
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "one.png").write_bytes(b"one")
+    prompts = tmp_path / "prompts.json"
+    prompts.write_text('[{"id":"P01","name":"One","text":"Prompt"}]', encoding="utf-8")
+    manager = CampaignManager(repo)
+    campaigns = [manager.create_campaign(
+        name=name, frames_folder=frames, prompts_source=prompts,
+        output_folder=tmp_path / name,
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={},
+    ) for name in ("First", "Second")]
+    first_job = repo.list_jobs(campaigns[0].id)[0]
+    second_job = repo.list_jobs(campaigns[1].id)[0]
+
+    assert not repo.delete_pending_job(campaigns[0].id, second_job.id)
+    assert repo.count_jobs(campaigns[1].id) == 1
+    assert repo.claim_next_job(campaigns[0].id).id == first_job.id
+    assert not repo.delete_pending_job(campaigns[0].id, first_job.id)
+    assert repo.delete_pending_job(campaigns[1].id, second_job.id)
+    assert repo.count_jobs(campaigns[0].id) == 1
+    assert repo.count_jobs(campaigns[1].id) == 0
+
+
 def test_add_jobs_to_existing_campaign_keeps_campaign_and_orders_jobs_after_existing(tmp_path: Path):
     frames_dir = tmp_path / "frames"
     frames_dir.mkdir()

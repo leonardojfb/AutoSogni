@@ -2,7 +2,7 @@ from pathlib import Path
 import time
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem
+from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QMessageBox
 
 from app.core.campaign_manager import CampaignManager
 from app.database.db import Database
@@ -360,6 +360,67 @@ def test_add_jobs_to_selected_campaign_keeps_campaign_count_and_updates_visible_
     assert window.sogni_queue_table.item(1, 1).text() == "extra.png"
     assert window.sogni_queue_table.item(1, 2).text() == "Extra"
     assert window.campaign_queue_add_button.text() == "Agregar jobs a campaña seleccionada"
+
+
+def test_new_campaign_starts_with_empty_queue_until_jobs_are_added(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "one.png").write_bytes(b"one")
+    (frames / "two.png").write_bytes(b"two")
+    prompts = tmp_path / "prompts.json"
+    prompts.write_text('[{"id":"P01","name":"One","text":"Prompt"}]', encoding="utf-8")
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+    window.name_edit.setText("China")
+    window.frames_edit.setText(str(frames))
+    window.prompts_edit.setText(str(prompts))
+    window.output_edit.setText(str(tmp_path / "out"))
+
+    window._create_campaign()
+
+    campaign_id = window.current_campaign_id
+    assert repo.get_campaign(campaign_id).name == "China"
+    assert repo.count_jobs(campaign_id) == 0
+    assert window.sogni_queue_table.rowCount() == 0
+
+    window._add_jobs_to_selected_campaign()
+
+    assert repo.count_jobs(campaign_id) == 2
+    assert {job.campaign_id for job in repo.list_jobs(campaign_id)} == {campaign_id}
+    assert window.sogni_queue_table.rowCount() == 2
+
+
+def test_sogni_queue_delete_removes_only_confirmed_pending_job(tmp_path: Path, monkeypatch):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "one.png").write_bytes(b"one")
+    (frames / "two.png").write_bytes(b"two")
+    prompts = tmp_path / "prompts.json"
+    prompts.write_text('[{"id":"P01","name":"One","text":"Prompt"}]', encoding="utf-8")
+    campaign = CampaignManager(repo).create_campaign(
+        name="China", frames_folder=frames, prompts_source=prompts,
+        output_folder=tmp_path / "out",
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={},
+    )
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+    assert window.current_campaign_id == campaign.id
+    jobs = repo.list_jobs(campaign.id)
+    delete_button = window.sogni_queue_table.cellWidget(0, 6)
+    assert delete_button.text() == "Eliminar"
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+
+    delete_button.click()
+
+    assert [job.id for job in repo.list_jobs(campaign.id)] == [jobs[1].id]
+    assert window.sogni_queue_table.rowCount() == 1
 
 
 def test_add_to_queue_groups_jobs_by_frame_name(tmp_path: Path):
