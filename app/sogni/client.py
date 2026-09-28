@@ -93,11 +93,11 @@ class SogniClient:
         return ModelDescriptor.from_api(response.json().get("data", {}).get("model", {}))
 
     def fetch_loras(self, model_id: str, include_personal: bool = False) -> list[dict[str, Any]]:
-        response = self._client.get("/v1/loras/comfy", params={"modelId": model_id})
+        response = self._client.get("/v1/loras/comfy", params={"modelId": model_id}, timeout=20.0)
         response.raise_for_status()
         rows = response.json().get("data", {}).get("loras", [])
         if include_personal:
-            response = self._client.get("/v1/loras/personal/catalog", headers=self._headers())
+            response = self._client.get("/v1/loras/personal/catalog", headers=self._headers(), timeout=20.0)
             response.raise_for_status()
             rows += response.json().get("data", {}).get("loras", [])
         return [row for row in rows if model_id in row.get("modelIds", [])]

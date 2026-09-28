@@ -23,15 +23,18 @@ Set `SOGNI_API_KEY` or save it in the Settings tab. The app stores local state i
 8. Soft pause sets the campaign to `PAUSE_REQUESTED`; the active job is allowed to finish.
 
 For MiniMax H3 image-to-video campaigns, choose an H3 I2V model and open
-`Browse LoRAs`. The dialog loads LoRAs compatible with that exact model, lets
-you set each strength and order up to 8 selections, and saves the stack with
-the new campaign. Turn off the campaign's sensitive-content filter to see
-`My LoRAs` and import a personal LoRA from a supported public URL. Imports
-require rights confirmation and may remain queued until Sogni marks them
-ready; refresh the catalog before selecting one. Trigger words must be in the
-prompt you supply. The app does not alter prompt text for LoRAs. These settings
-apply to newly created campaigns; existing queued campaigns retain their
-saved settings.
+`Browse LoRAs`. The catalog opens immediately and loads LoRAs compatible with
+that exact model. Set each strength and order up to 8 selections; the stack is
+saved with the new campaign. Turning off the sensitive-content filter also
+shows `My LoRAs` and the import form. Personal imports require rights
+confirmation and can remain queued until Sogni marks them ready. Trigger words
+must be included in the prompt you supply; the app does not change prompt text.
+Existing campaigns retain their saved settings.
+
+On the Campaign tab, `Agregar jobs a campaña seleccionada` appends new frame
+and prompt combinations to the selected campaign. `Cola Sogni` lists its jobs
+and statuses; repeating an identical frame and prompt combination does not
+create another job.
 
 ## WaveSpeedAI tab
 

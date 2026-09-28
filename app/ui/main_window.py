@@ -164,8 +164,9 @@ class MainWindow(QMainWindow):
         self.model_combo = QComboBox()
         self.model_combo.currentIndexChanged.connect(self._sogni_model_changed)
         self.sogni_lora_button = QPushButton("Browse LoRAs")
+        self.sogni_lora_button.setToolTip("Elegí un modelo MiniMax H3 de imagen a video para ver sus LoRAs comunitarias.")
         self.sogni_lora_button.clicked.connect(self._open_sogni_loras)
-        self.sogni_lora_label = QLabel("Sin LoRAs")
+        self.sogni_lora_label = QLabel("Elegí un modelo MiniMax H3 I2V")
         self.sogni_sensitive_filter_check = QCheckBox("Filtro de contenido sensible activo")
         self.sogni_sensitive_filter_check.setChecked(True)
         self.duration_mode_combo = QComboBox()
@@ -206,9 +207,11 @@ class MainWindow(QMainWindow):
         fetch_models.clicked.connect(self._fetch_models)
         create = QPushButton("Create Campaign")
         create.clicked.connect(self._create_campaign)
-        self.campaign_queue_add_button = QPushButton("Agregar a la cola")
-        self.campaign_queue_add_button.setToolTip("Crea la campaña y deja todos sus videos pendientes en la cola secuencial.")
-        self.campaign_queue_add_button.clicked.connect(self._create_campaign)
+        self.campaign_queue_add_button = QPushButton("Agregar jobs a campaña seleccionada")
+        self.campaign_queue_add_button.setToolTip(
+            "Agrega los frames y prompts indicados a la campaña seleccionada; no crea otra campaña."
+        )
+        self.campaign_queue_add_button.clicked.connect(self._add_jobs_to_selected_campaign)
         self.start_button = QPushButton("Iniciar cola / Reanudar")
         self.start_button.clicked.connect(self._start_campaign)
         pause = QPushButton("Soft Pause")
@@ -224,6 +227,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.progress)
         self.summary_label = QLabel("No campaign selected.")
         layout.addWidget(self.summary_label)
+
+        queue_group = QGroupBox("Cola Sogni")
+        queue_layout = QVBoxLayout(queue_group)
+        self.sogni_queue_table = QTableWidget(0, 7)
+        self.sogni_queue_table.setHorizontalHeaderLabels(
+            ["#", "Frame", "Prompt", "Modelo", "Estado", "Intentos", "Acción"]
+        )
+        self.sogni_queue_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        queue_layout.addWidget(self.sogni_queue_table)
+        layout.addWidget(queue_group)
         return page
 
     def _frames_tab(self) -> QWidget:
@@ -706,6 +719,15 @@ class MainWindow(QMainWindow):
             layout.addWidget(filename, 1)
             layout.addWidget(badge)
             widget.setItemWidget(item, row)
+
+    def _flux_move_image(self, direction: int) -> None:
+        source = self.flux_images.currentRow()
+        destination = source + direction
+        if source < 0 or not 0 <= destination < self.flux_images.count():
+            return
+        item = self.flux_images.takeItem(source)
+        self.flux_images.insertItem(destination, item)
+        self.flux_images.setCurrentRow(destination)
 
     def _flux_choose_output(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta de salida")
@@ -1662,11 +1684,17 @@ class MainWindow(QMainWindow):
         self.sogni_lora_label.setText("Sin LoRAs")
         model = self.model_combo.currentData()
         model_id = model.id if model else ""
+        if not model_id.startswith(("minimax-h3-fl2va-fp8_i2v", "minimax-h3-fastvideo-int8_i2v")):
+            self.sogni_lora_label.setText("Elegí un modelo MiniMax H3 I2V")
         self.sogni_lora_button.setEnabled(model_id.startswith(("minimax-h3-fl2va-fp8_i2v", "minimax-h3-fastvideo-int8_i2v")))
 
     def _open_sogni_loras(self) -> None:
         model = self.model_combo.currentData()
         if not model:
+            QMessageBox.information(self, "LoRAs comunitarias", "Primero actualizá el catálogo y seleccioná un modelo MiniMax H3 de imagen a video.")
+            return
+        if not model.id.startswith(("minimax-h3-fl2va-fp8_i2v", "minimax-h3-fastvideo-int8_i2v")):
+            QMessageBox.information(self, "LoRAs comunitarias", "Las LoRAs de esta lista requieren un modelo MiniMax H3 de imagen a video.")
             return
         dialog = SogniLoraDialog(
             self.sogni, model.id, self._selected_sogni_loras, self,
@@ -1720,6 +1748,23 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Create campaign", str(exc))
 
+    def _add_jobs_to_selected_campaign(self) -> None:
+        if not self.current_campaign_id:
+            QMessageBox.warning(self, "Cola Sogni", "Seleccioná una campaña antes de agregar jobs.")
+            return
+        try:
+            added = CampaignManager(self.repo).add_jobs_to_campaign(
+                self.current_campaign_id,
+                Path(self.frames_edit.text()),
+                Path(self.prompts_edit.text()),
+            )
+            self._refresh_tables()
+            self.summary_label.setText(
+                f"{added} job(s) agregados a la campaña #{self.current_campaign_id}."
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Cola Sogni", str(exc))
+
     def _load_campaigns(self) -> None:
         self.campaign_combo.blockSignals(True)
         self.campaign_combo.clear()
@@ -1770,6 +1815,7 @@ class MainWindow(QMainWindow):
         self.prompts_table.blockSignals(False)
 
         self.jobs_table.setRowCount(len(jobs))
+        self.sogni_queue_table.setRowCount(len(jobs))
         for row, job in enumerate(jobs):
             frame = frame_by_id[job.frame_id]
             prompt = prompt_by_id[job.prompt_id]
@@ -1783,10 +1829,30 @@ class MainWindow(QMainWindow):
             ]):
                 self._set_item(self.jobs_table, row, col, text, job.id, editable=False)
             self._set_item(self.jobs_table, row, 7, f"#{row + 1}", job.id, editable=False)
+            self._populate_campaign_job_row(
+                self.sogni_queue_table,
+                row,
+                job,
+                [frame.filename, prompt.prompt_name, campaign.model_name],
+            )
             if job.status == "FAILED":
                 retry = QPushButton("Reintentar")
                 retry.clicked.connect(lambda checked=False, job_id=job.id: self._retry_job(job_id))
                 self.jobs_table.setCellWidget(row, 6, retry)
+
+    def _populate_campaign_job_row(self, table: QTableWidget, row: int, job, details: list[str]) -> None:
+        values = [
+            str(job.order_index),
+            *details,
+            _job_status_label(job.status),
+            str(job.attempt_count),
+        ]
+        for column, value in enumerate(values):
+            self._set_item(table, row, column, value, job.id, editable=False)
+        if job.status == "FAILED":
+            retry = QPushButton("Reintentar")
+            retry.clicked.connect(lambda checked=False, job_id=job.id: self._retry_job(job_id))
+            table.setCellWidget(row, 6, retry)
 
     def _set_item(self, table: QTableWidget, row: int, col: int, text: str, record_id: int, editable: bool = True) -> None:
         item = QTableWidgetItem(text)

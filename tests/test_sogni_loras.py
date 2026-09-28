@@ -9,6 +9,19 @@ from app.sogni.loras import validate_lora_selection
 MODEL = "minimax-h3-fl2va-fp8_i2v"
 
 
+def _wait_for_lora_catalog(dialog):
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if not dialog.isVisible():
+        dialog.show()
+    app.processEvents()
+    worker = dialog._catalog_worker
+    if worker is not None:
+        assert worker.wait(5000)
+    app.processEvents()
+
+
 def test_fetch_loras_filters_public_and_personal_by_exact_model():
     def respond(request):
         if request.url.path == "/v1/loras/comfy":
@@ -100,6 +113,7 @@ def test_lora_dialog_collects_checked_rows_and_strengths():
                      "description": "Natural body motion", "ui": {"min": 0, "max": 2, "default": 0.6, "step": 0.1}}]
 
     dialog = SogniLoraDialog(CatalogClient(), MODEL, [])
+    _wait_for_lora_catalog(dialog)
     assert dialog.table.rowCount() == 1
     dialog.table.item(0, 0).setCheckState(Qt.Checked)
     dialog.table.cellWidget(0, 1).setValue(0.8)
@@ -121,6 +135,7 @@ def test_lora_dialog_reorders_stack_and_keeps_selection_on_refresh():
                     for item in ("first", "second")]
 
     dialog = SogniLoraDialog(CatalogClient(), MODEL, [])
+    _wait_for_lora_catalog(dialog)
     dialog.table.item(0, 0).setCheckState(Qt.Checked)
     dialog.table.item(1, 0).setCheckState(Qt.Checked)
     dialog.table.cellWidget(0, 1).setValue(0.4)
@@ -128,6 +143,7 @@ def test_lora_dialog_reorders_stack_and_keeps_selection_on_refresh():
     dialog.table.selectRow(1)
     dialog._move(-1)
     dialog.refresh()
+    _wait_for_lora_catalog(dialog)
     dialog.accept()
     assert dialog.selected_loras == [["second", 0.8], ["first", 0.4]]
 
@@ -145,6 +161,7 @@ def test_lora_dialog_shows_one_based_position_for_selected_stack():
                     for item in ("first", "second")]
 
     dialog = SogniLoraDialog(CatalogClient(), MODEL, [])
+    _wait_for_lora_catalog(dialog)
     dialog.table.item(0, 0).setCheckState(Qt.Checked)
     dialog.table.item(1, 0).setCheckState(Qt.Checked)
 

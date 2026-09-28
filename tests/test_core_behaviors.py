@@ -101,6 +101,74 @@ def test_campaign_creation_persists_full_matrix_before_running(tmp_path: Path):
     }
 
 
+def test_add_jobs_to_existing_campaign_keeps_campaign_and_orders_jobs_after_existing(tmp_path: Path):
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    (frames_dir / "outfit_01_pink_dress.png").write_bytes(b"pink")
+    prompt_source = tmp_path / "prompts.json"
+    prompt_source.write_text(json.dumps([{"id": "P01", "name": "One", "text": "First"}]), encoding="utf-8")
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    manager = CampaignManager(repo)
+    campaign = manager.create_campaign(
+        name="Existing",
+        frames_folder=frames_dir,
+        prompts_source=prompt_source,
+        output_folder=tmp_path / "out",
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={},
+    )
+
+    extra_frames = tmp_path / "extra_frames"
+    extra_frames.mkdir()
+    (extra_frames / "outfit_02_black_top.png").write_bytes(b"black")
+    extra_prompts = tmp_path / "extra_prompts.json"
+    extra_prompts.write_text(
+        json.dumps([
+            {"id": "P02", "name": "Two", "text": "Second"},
+            {"id": "P03", "name": "Three", "text": "Third"},
+        ]),
+        encoding="utf-8",
+    )
+
+    added = manager.add_jobs_to_campaign(campaign.id, extra_frames, extra_prompts)
+
+    jobs = repo.list_jobs(campaign.id)
+    assert added == 2
+    assert repo.get_campaign(campaign.id).id == campaign.id
+    assert [job.order_index for job in jobs] == [1, 2, 3]
+    assert [job.idempotency_key for job in jobs] == [
+        f"sva:{campaign.id}:0001", f"sva:{campaign.id}:0002", f"sva:{campaign.id}:0003"
+    ]
+
+
+def test_readding_identical_frame_prompt_pairs_does_not_duplicate_jobs(tmp_path: Path):
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    (frames_dir / "outfit_01_pink_dress.png").write_bytes(b"pink")
+    prompt_source = tmp_path / "prompts.json"
+    prompt_source.write_text(json.dumps([{"id": "P01", "name": "One", "text": "First"}]), encoding="utf-8")
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    campaign = CampaignManager(repo).create_campaign(
+        name="Existing",
+        frames_folder=frames_dir,
+        prompts_source=prompt_source,
+        output_folder=tmp_path / "out",
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={},
+    )
+
+    added = CampaignManager(repo).add_jobs_to_campaign(campaign.id, frames_dir, prompt_source)
+
+    assert added == 0
+    assert repo.count_jobs(campaign.id) == 1
+    assert len(repo.list_frames(campaign.id)) == 1
+    assert len(repo.list_prompts(campaign.id)) == 1
+
+
 def test_atomic_job_claim_claims_one_pending_job(tmp_path: Path):
     db = Database(tmp_path / "app.db")
     db.initialize()

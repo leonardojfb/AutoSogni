@@ -4,10 +4,12 @@ import time
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem
 
+from app.core.campaign_manager import CampaignManager
 from app.database.db import Database
 from app.database.repositories import CampaignRepository
 from app.sogni.auth import ApiKeyStore
 from app.sogni.client import SogniClient
+from app.sogni.schemas import ModelDescriptor
 from app.ui.main_window import MainWindow
 from app.wavespeed.queue import (
     QueueStatus,
@@ -298,7 +300,7 @@ def test_campaign_panel_exposes_queue_then_sequential_start_actions(tmp_path: Pa
     db.initialize()
     window = MainWindow(CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
 
-    assert window.campaign_queue_add_button.text() == "Agregar a la cola"
+    assert window.campaign_queue_add_button.text() == "Agregar jobs a campaña seleccionada"
     assert window.start_button.text() == "Iniciar cola / Reanudar"
 
 
@@ -316,6 +318,48 @@ def test_reference_lists_show_one_based_position_badges(tmp_path: Path):
 
     assert window.flux_images.itemWidget(window.flux_images.item(0)).findChild(QLabel, "positionBadge").text() == "#1"
     assert window.flux_images.itemWidget(window.flux_images.item(1)).findChild(QLabel, "positionBadge").text() == "#2"
+
+
+def test_add_jobs_to_selected_campaign_keeps_campaign_count_and_updates_visible_sogni_queue(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+
+    original_frames = tmp_path / "original_frames"
+    original_frames.mkdir()
+    (original_frames / "original.png").write_bytes(b"original")
+    original_prompts = tmp_path / "original_prompts.json"
+    original_prompts.write_text('[{"id":"P01","name":"Original","text":"Original prompt"}]', encoding="utf-8")
+    campaign = CampaignManager(repo).create_campaign(
+        name="Selected campaign",
+        frames_folder=original_frames,
+        prompts_source=original_prompts,
+        output_folder=tmp_path / "out",
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={},
+    )
+
+    extra_frames = tmp_path / "extra_frames"
+    extra_frames.mkdir()
+    (extra_frames / "extra.png").write_bytes(b"extra")
+    extra_prompts = tmp_path / "extra_prompts.json"
+    extra_prompts.write_text('[{"id":"P02","name":"Extra","text":"Added prompt"}]', encoding="utf-8")
+
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"))
+    window.current_campaign_id = campaign.id
+    window.frames_edit.setText(str(extra_frames))
+    window.prompts_edit.setText(str(extra_prompts))
+    before_count = len(repo.list_campaigns())
+
+    window._add_jobs_to_selected_campaign()
+
+    assert len(repo.list_campaigns()) == before_count
+    assert window.sogni_queue_table.rowCount() == 2
+    assert window.sogni_queue_table.item(0, 4).text() == "En cola"
+    assert window.sogni_queue_table.item(1, 1).text() == "extra.png"
+    assert window.sogni_queue_table.item(1, 2).text() == "Extra"
+    assert window.campaign_queue_add_button.text() == "Agregar jobs a campaña seleccionada"
 
 
 def test_add_to_queue_groups_jobs_by_frame_name(tmp_path: Path):

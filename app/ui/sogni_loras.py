@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
@@ -9,6 +9,29 @@ from PySide6.QtWidgets import (
 
 from app.sogni.loras import validate_lora_selection
 
+
+class _CatalogWorker(QThread):
+    loaded = Signal(object, str)
+
+    def __init__(self, client, model_id: str, include_personal: bool) -> None:
+        super().__init__()
+        self.client = client
+        self.model_id = model_id
+        self.include_personal = include_personal
+
+    def run(self) -> None:
+        try:
+            rows = self.client.fetch_loras(self.model_id, include_personal=self.include_personal)
+            self.loaded.emit(rows, "")
+        except Exception as exc:
+            if self.include_personal:
+                try:
+                    rows = self.client.fetch_loras(self.model_id)
+                    self.loaded.emit(rows, f"My LoRAs no está disponible: {exc}. Se muestra la comunidad.")
+                    return
+                except Exception:
+                    pass
+            self.loaded.emit([], str(exc))
 
 class SogniLoraDialog(QDialog):
     def __init__(self, client, model_id: str, selected_loras: list[list], parent=None, *, show_personal=False) -> None:
@@ -34,9 +57,11 @@ class SogniLoraDialog(QDialog):
         self.table.setColumnWidth(3, 65)
         self.table.itemChanged.connect(lambda _item: self._update_positions())
         layout.addWidget(self.table)
+        self.status_label = QLabel("Cargando LoRAs comunitarias…")
+        layout.addWidget(self.status_label)
         order = QHBoxLayout()
-        up = QPushButton("↑ Subir")
-        down = QPushButton("↓ Bajar")
+        up = QPushButton("Subir")
+        down = QPushButton("Bajar")
         up.clicked.connect(lambda: self._move(-1))
         down.clicked.connect(lambda: self._move(1))
         order.addWidget(up)
@@ -63,7 +88,10 @@ class SogniLoraDialog(QDialog):
         buttons = QHBoxLayout()
         refresh = QPushButton("Actualizar catálogo")
         save = QPushButton("Usar selección")
+        save.setEnabled(False)
         cancel = QPushButton("Cancelar")
+        self.refresh_button = refresh
+        self.save_button = save
         refresh.clicked.connect(self.refresh)
         save.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
@@ -72,25 +100,35 @@ class SogniLoraDialog(QDialog):
         buttons.addWidget(save)
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
-        self.refresh()
+        self._catalog_worker = None
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._catalog_worker is None and not self.catalog:
+            self.refresh()
 
     def refresh(self) -> None:
+        if self._catalog_worker is not None and self._catalog_worker.isRunning():
+            return
         if self.catalog:
             self.selected_loras = self._checked_selection()
-        try:
-            self.catalog = self.client.fetch_loras(self.model_id, include_personal=self.show_personal)
-        except Exception as exc:
-            if not self.show_personal:
-                QMessageBox.warning(self, "LoRAs", f"No se pudo cargar el catálogo: {exc}")
-                return
-            try:
-                self.catalog = self.client.fetch_loras(self.model_id)
-            except Exception:
-                QMessageBox.warning(self, "LoRAs", f"No se pudo cargar el catálogo: {exc}")
-                return
-            QMessageBox.warning(self, "My LoRAs", f"No se pudo cargar My LoRAs; se muestra el catálogo público. {exc}")
-        if not self.show_personal:
-            self.catalog = [row for row in self.catalog if not (row.get("ui") or {}).get("nsfw") and not (row.get("ui") or {}).get("sexual")]
+        self.status_label.setText("Cargando LoRAs comunitarias…")
+        self.refresh_button.setEnabled(False)
+        worker = _CatalogWorker(self.client, self.model_id, self.show_personal)
+        self._catalog_worker = worker
+        worker.loaded.connect(self._catalog_loaded)
+        worker.finished.connect(lambda: self.refresh_button.setEnabled(True))
+        worker.start()
+
+    def _catalog_loaded(self, rows: list[dict], error: str) -> None:
+        if error and not rows:
+            self.status_label.setText(f"No se pudo cargar el catálogo: {error}")
+            return
+        if error:
+            self.status_label.setText(error)
+        else:
+            self.status_label.setText(f"{len(rows)} LoRAs compatibles con este modelo")
+        self.catalog = rows
         selected = {item[0]: item[1] for item in self.selected_loras}
         rows = sorted(self.catalog, key=lambda row: (
             0 if row.get("loraId") in selected else 1,
@@ -117,9 +155,17 @@ class SogniLoraDialog(QDialog):
             self.table.setItem(row_index, 0, item)
             self.table.setCellWidget(row_index, 1, strength)
             self.table.setItem(row_index, 2, details)
+        position = 1
+        for row_index in range(self.table.rowCount()):
+            item = self.table.item(row_index, 0)
+            position_item = QTableWidgetItem(f"#{position}" if item.checkState() == Qt.Checked else "—")
+            position_item.setFlags(position_item.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(row_index, 3, position_item)
+            if item.checkState() == Qt.Checked:
+                position += 1
         self.table.blockSignals(False)
-        self._update_positions()
         self._filter(self.search_edit.text())
+        self.save_button.setEnabled(bool(self.catalog))
 
     def _filter(self, query: str) -> None:
         query = query.casefold().strip()
