@@ -22,6 +22,7 @@ __pycache__/
 .venv/
 venv/
 env/
+/.worktrees/
 
 # Generated media and local input assets
 talking/
