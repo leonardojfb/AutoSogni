@@ -207,12 +207,18 @@ class MainWindow(QMainWindow):
         fetch_models.clicked.connect(self._fetch_models)
         create = QPushButton("Create Campaign")
         create.clicked.connect(self._create_campaign)
+        self.campaign_queue_add_button = QPushButton("Agregar jobs a campaña seleccionada")
+        self.campaign_queue_add_button.setToolTip(
+            "Agrega los frames y prompts indicados a la campaña seleccionada; no crea otra campaña."
+        )
+        self.campaign_queue_add_button.clicked.connect(self._add_jobs_to_selected_campaign)
         self.start_button = QPushButton("Start / Resume")
         self.start_button.clicked.connect(self._start_campaign)
         pause = QPushButton("Soft Pause")
         pause.clicked.connect(self._pause_campaign)
         buttons.addWidget(fetch_models)
         buttons.addWidget(create)
+        buttons.addWidget(self.campaign_queue_add_button)
         buttons.addWidget(self.start_button)
         buttons.addWidget(pause)
         layout.addLayout(buttons)
@@ -221,6 +227,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.progress)
         self.summary_label = QLabel("No campaign selected.")
         layout.addWidget(self.summary_label)
+
+        queue_group = QGroupBox("Cola Sogni")
+        queue_layout = QVBoxLayout(queue_group)
+        self.sogni_queue_table = QTableWidget(0, 7)
+        self.sogni_queue_table.setHorizontalHeaderLabels(
+            ["#", "Frame", "Prompt", "Modelo", "Estado", "Intentos", "Acción"]
+        )
+        self.sogni_queue_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        queue_layout.addWidget(self.sogni_queue_table)
+        layout.addWidget(queue_group)
         return page
 
     def _frames_tab(self) -> QWidget:
@@ -1701,6 +1717,23 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Create campaign", str(exc))
 
+    def _add_jobs_to_selected_campaign(self) -> None:
+        if not self.current_campaign_id:
+            QMessageBox.warning(self, "Cola Sogni", "Seleccioná una campaña antes de agregar jobs.")
+            return
+        try:
+            added = CampaignManager(self.repo).add_jobs_to_campaign(
+                self.current_campaign_id,
+                Path(self.frames_edit.text()),
+                Path(self.prompts_edit.text()),
+            )
+            self._refresh_tables()
+            self.summary_label.setText(
+                f"{added} job(s) agregados a la campaña #{self.current_campaign_id}."
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Cola Sogni", str(exc))
+
     def _load_campaigns(self) -> None:
         self.campaign_combo.blockSignals(True)
         self.campaign_combo.clear()
@@ -1749,22 +1782,36 @@ class MainWindow(QMainWindow):
         self.prompts_table.blockSignals(False)
 
         self.jobs_table.setRowCount(len(jobs))
+        self.sogni_queue_table.setRowCount(len(jobs))
         for row, job in enumerate(jobs):
             frame = frame_by_id[job.frame_id]
             prompt = prompt_by_id[job.prompt_id]
-            for col, text in enumerate([
-                str(job.order_index),
-                frame.outfit_name,
-                prompt.prompt_name,
-                campaign.model_name,
-                _job_status_label(job.status),
-                str(job.attempt_count),
-            ]):
-                self._set_item(self.jobs_table, row, col, text, job.id, editable=False)
-            if job.status == "FAILED":
-                retry = QPushButton("Reintentar")
-                retry.clicked.connect(lambda checked=False, job_id=job.id: self._retry_job(job_id))
-                self.jobs_table.setCellWidget(row, 6, retry)
+            self._populate_campaign_job_row(
+                self.jobs_table,
+                row,
+                job,
+                [frame.outfit_name, prompt.prompt_name, campaign.model_name],
+            )
+            self._populate_campaign_job_row(
+                self.sogni_queue_table,
+                row,
+                job,
+                [frame.filename, prompt.prompt_name, campaign.model_name],
+            )
+
+    def _populate_campaign_job_row(self, table: QTableWidget, row: int, job, details: list[str]) -> None:
+        values = [
+            str(job.order_index),
+            *details,
+            _job_status_label(job.status),
+            str(job.attempt_count),
+        ]
+        for column, value in enumerate(values):
+            self._set_item(table, row, column, value, job.id, editable=False)
+        if job.status == "FAILED":
+            retry = QPushButton("Reintentar")
+            retry.clicked.connect(lambda checked=False, job_id=job.id: self._retry_job(job_id))
+            table.setCellWidget(row, 6, retry)
 
     def _set_item(self, table: QTableWidget, row: int, col: int, text: str, record_id: int, editable: bool = True) -> None:
         item = QTableWidgetItem(text)
