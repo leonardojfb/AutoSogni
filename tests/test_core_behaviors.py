@@ -143,6 +143,32 @@ def test_add_jobs_to_existing_campaign_keeps_campaign_and_orders_jobs_after_exis
     ]
 
 
+def test_readding_identical_frame_prompt_pairs_does_not_duplicate_jobs(tmp_path: Path):
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    (frames_dir / "outfit_01_pink_dress.png").write_bytes(b"pink")
+    prompt_source = tmp_path / "prompts.json"
+    prompt_source.write_text(json.dumps([{"id": "P01", "name": "One", "text": "First"}]), encoding="utf-8")
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    campaign = CampaignManager(repo).create_campaign(
+        name="Existing",
+        frames_folder=frames_dir,
+        prompts_source=prompt_source,
+        output_folder=tmp_path / "out",
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={},
+    )
+
+    added = CampaignManager(repo).add_jobs_to_campaign(campaign.id, frames_dir, prompt_source)
+
+    assert added == 0
+    assert repo.count_jobs(campaign.id) == 1
+    assert len(repo.list_frames(campaign.id)) == 1
+    assert len(repo.list_prompts(campaign.id)) == 1
+
+
 def test_atomic_job_claim_claims_one_pending_job(tmp_path: Path):
     db = Database(tmp_path / "app.db")
     db.initialize()

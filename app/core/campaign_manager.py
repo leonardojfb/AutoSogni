@@ -83,26 +83,50 @@ class CampaignManager:
         self.repo.get_campaign(campaign_id)
         frames = validate_frames_folder(frames_folder)
         prompts = import_prompts(prompts_source)
-
-        frame_ids = [
-            self.repo.insert_frame(
-                campaign_id,
-                str(frame),
-                frame.name,
-                default_outfit_name(frame.name),
-                sha256_file(frame),
-            )
-            for frame in frames
-        ]
-        prompt_ids = [
-            self.repo.insert_prompt(campaign_id, prompt.prompt_code, prompt.prompt_name, prompt.prompt_text)
-            for prompt in prompts
-        ]
-
         existing_jobs = self.repo.list_jobs(campaign_id)
+        frame_by_id = {frame.id: frame for frame in self.repo.list_frames(campaign_id)}
+        prompt_by_id = {prompt.id: prompt for prompt in self.repo.list_prompts(campaign_id)}
+        existing_pairs = {
+            (
+                frame_by_id[job.frame_id].sha256,
+                prompt_by_id[job.prompt_id].prompt_code,
+                prompt_by_id[job.prompt_id].prompt_name,
+                prompt_by_id[job.prompt_id].prompt_text,
+            )
+            for job in existing_jobs
+        }
+
+        frame_ids_by_hash = {frame.sha256: frame.id for frame in frame_by_id.values()}
+        prompt_ids_by_content = {
+            (prompt.prompt_code, prompt.prompt_name, prompt.prompt_text): prompt.id
+            for prompt in prompt_by_id.values()
+        }
         order_index = max((job.order_index for job in existing_jobs), default=0) + 1
-        for frame_id in frame_ids:
-            for prompt_id in prompt_ids:
+        added_count = 0
+        for frame in frames:
+            frame_hash = sha256_file(frame)
+            for prompt in prompts:
+                pair = (frame_hash, prompt.prompt_code, prompt.prompt_name, prompt.prompt_text)
+                if pair in existing_pairs:
+                    continue
+
+                frame_id = frame_ids_by_hash.get(frame_hash)
+                if frame_id is None:
+                    frame_id = self.repo.insert_frame(
+                        campaign_id,
+                        str(frame),
+                        frame.name,
+                        default_outfit_name(frame.name),
+                        frame_hash,
+                    )
+                    frame_ids_by_hash[frame_hash] = frame_id
+                prompt_key = (prompt.prompt_code, prompt.prompt_name, prompt.prompt_text)
+                prompt_id = prompt_ids_by_content.get(prompt_key)
+                if prompt_id is None:
+                    prompt_id = self.repo.insert_prompt(
+                        campaign_id, prompt.prompt_code, prompt.prompt_name, prompt.prompt_text
+                    )
+                    prompt_ids_by_content[prompt_key] = prompt_id
                 self.repo.insert_job(
                     campaign_id,
                     frame_id,
@@ -110,6 +134,8 @@ class CampaignManager:
                     order_index,
                     f"sva:{campaign_id}:{order_index:04d}",
                 )
+                existing_pairs.add(pair)
                 order_index += 1
+                added_count += 1
 
-        return len(frame_ids) * len(prompt_ids)
+        return added_count
