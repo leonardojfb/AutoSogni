@@ -73,3 +73,43 @@ class CampaignManager:
                 order_index += 1
 
         return self.repo.get_campaign(campaign_id)
+
+    def add_jobs_to_campaign(
+        self,
+        campaign_id: int,
+        frames_folder: Path,
+        prompts_source: Path,
+    ) -> int:
+        self.repo.get_campaign(campaign_id)
+        frames = validate_frames_folder(frames_folder)
+        prompts = import_prompts(prompts_source)
+
+        frame_ids = [
+            self.repo.insert_frame(
+                campaign_id,
+                str(frame),
+                frame.name,
+                default_outfit_name(frame.name),
+                sha256_file(frame),
+            )
+            for frame in frames
+        ]
+        prompt_ids = [
+            self.repo.insert_prompt(campaign_id, prompt.prompt_code, prompt.prompt_name, prompt.prompt_text)
+            for prompt in prompts
+        ]
+
+        existing_jobs = self.repo.list_jobs(campaign_id)
+        order_index = max((job.order_index for job in existing_jobs), default=0) + 1
+        for frame_id in frame_ids:
+            for prompt_id in prompt_ids:
+                self.repo.insert_job(
+                    campaign_id,
+                    frame_id,
+                    prompt_id,
+                    order_index,
+                    f"sva:{campaign_id}:{order_index:04d}",
+                )
+                order_index += 1
+
+        return len(frame_ids) * len(prompt_ids)
