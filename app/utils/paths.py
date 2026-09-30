@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 
@@ -11,7 +13,11 @@ def project_root() -> Path:
 
 
 def data_dir() -> Path:
-    path = project_root() / "data"
+    if getattr(sys, "frozen", False):
+        local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        path = local_app_data / APP_NAME / "data"
+    else:
+        path = project_root() / "data"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
