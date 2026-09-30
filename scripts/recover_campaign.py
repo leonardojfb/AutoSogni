@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
 import sqlite3
 import sys
-import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.database.db import Database
 from app.core.filename_builder import FilenameBuilder, FilenameContext, sanitize_path_part
@@ -243,6 +246,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-id")
     parser.add_argument("--model-name")
     parser.add_argument("--settings-json")
+    parser.add_argument("--settings-file", type=Path, help="Read generation settings from a UTF-8 JSON file.")
     parser.add_argument("--template", default="{outfit}__{prompt_id}_{prompt_name}.mp4")
     parser.add_argument("--organization", choices=("by_outfit", "flat"), default="by_outfit")
     parser.add_argument("--database", type=Path)
@@ -258,12 +262,19 @@ def main(argv: list[str] | None = None) -> int:
         if not argv:
             return _run_interactive()
         required = (
-            "run_folder", "frames_folder", "prompts_file", "output_folder", "name",
-            "model_id", "model_name", "settings_json",
+            "run_folder", "frames_folder", "prompts_file", "output_folder", "name", "model_id", "model_name",
         )
         missing = [name.replace("_", "-") for name in required if getattr(args, name) is None]
+        if args.settings_json is None and args.settings_file is None:
+            missing.append("settings-json or settings-file")
+        if args.settings_json is not None and args.settings_file is not None:
+            parser.error("Use either --settings-json or --settings-file, not both.")
         if missing:
             parser.error(f"Missing required options: {', '.join('--' + name for name in missing)}")
+        settings_json = (
+            args.settings_file.read_text(encoding="utf-8-sig")
+            if args.settings_file is not None else args.settings_json
+        )
         return _run_recovery(
             run_dir=args.run_folder,
             frames_dir=args.frames_folder,
@@ -272,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
             name=args.name,
             model_id=args.model_id,
             model_name=args.model_name,
-            settings_json=args.settings_json,
+            settings_json=settings_json,
             filename_template=args.template,
             organization_mode=args.organization,
             database_override=args.database,
@@ -369,6 +380,7 @@ def _run_recovery(
     apply: bool,
     confirm: bool,
 ) -> int:
+    print("Close AutoSogni before applying recovery to avoid concurrent database changes.")
     scan = scan_inputs(run_dir, frames_dir, prompts_file, output_dir)
     matches = match_outputs(scan, filename_template, organization_mode, name, model_name)
     campaign = RecoveryCampaignInput(
@@ -410,12 +422,6 @@ def _run_recovery(
     if result.backup_path:
         print(f"Database backup: {result.backup_path}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
 
 
 def scan_inputs(run_dir: Path, frames_dir: Path, prompts_file: Path, output_dir: Path) -> ScanInputs:
@@ -520,3 +526,7 @@ def match_outputs(
 
 def _relative_key(path: Path) -> str:
     return path.as_posix().strip("./").casefold()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

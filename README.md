@@ -20,7 +20,10 @@ previews matches without changing the database; in interactive mode, type
 `RECUPERAR` to apply. It marks uniquely matched videos as `DONE`, leaves
 unmatched jobs `PENDING`, and creates a SQLite backup before writing. Supply
 the original model ID/name and settings JSON so pending jobs can be resumed
-with the intended configuration.
+with the intended configuration. For command-line use, settings can be passed
+as `--settings-json` or read from a UTF-8 file with `--settings-file`.
+The standalone `dist\RecuperarCampana.exe` runs without a Python installation.
+Close AutoSogni before applying recovery to avoid concurrent database changes.
 
 ## Current Flow
 

@@ -91,3 +91,22 @@ def test_cli_rejects_invalid_settings_before_creating_database(tmp_path: Path, c
     assert result == 1
     assert not database_path.exists()
     assert "Generation settings" in capsys.readouterr().err
+
+
+def test_cli_accepts_settings_from_json_file(tmp_path: Path, capsys):
+    run_dir, frames_dir, prompts_file = _run_folder(tmp_path)
+    database_path = tmp_path / "app.db"
+    settings_file = tmp_path / "generation-settings.json"
+    settings_file.write_text('{"duration": 7, "aspectRatio": "9:16"}', encoding="utf-8")
+    args = _args(run_dir, frames_dir, prompts_file, database_path)
+    settings_index = args.index("--settings-json")
+    del args[settings_index:settings_index + 2]
+    args.extend(["--settings-file", str(settings_file), "--apply"])
+
+    result = main(args)
+
+    assert result == 0
+    db = Database(database_path)
+    with db.connect() as conn:
+        settings = conn.execute("SELECT settings_json FROM campaigns").fetchone()[0]
+    assert json.loads(settings) == {"duration": 7, "aspectRatio": "9:16"}

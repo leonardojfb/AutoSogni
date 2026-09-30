@@ -1,3 +1,4 @@
+import csv
 import json
 import sqlite3
 from pathlib import Path
@@ -50,6 +51,25 @@ def test_scan_rejects_missing_required_inputs(tmp_path: Path):
         scan_inputs(run_dir, frames_dir, prompts_file, output_dir)
 
 
+@pytest.mark.parametrize("suffix", [".csv", ".txt"])
+def test_scan_uses_existing_csv_and_text_prompt_import_rules(tmp_path: Path, suffix: str):
+    run_dir, frames_dir, prompts_file, output_dir, _ = _scan(tmp_path)
+    prompts_file.unlink()
+    prompts_file = run_dir / f"prompts{suffix}"
+    expected = "First prompt line.\nSecond line stays intact."
+    if suffix == ".csv":
+        with prompts_file.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=("id", "name", "text"))
+            writer.writeheader()
+            writer.writerow({"id": "P01", "name": "Literal", "text": expected})
+    else:
+        prompts_file.write_text(expected, encoding="utf-8")
+
+    scan = scan_inputs(run_dir, frames_dir, prompts_file, output_dir)
+
+    assert scan.prompts[0].prompt_text == expected
+
+
 def test_matching_marks_only_unique_existing_output(tmp_path: Path):
     run_dir, frames_dir, prompts_file, output_dir, _ = _scan(tmp_path)
     output = output_dir / "Pink_Dress" / "Pink_Dress__P01_Quick_Question.mp4"
@@ -95,6 +115,20 @@ def test_matching_supports_flat_layout_and_case_insensitive_mp4_suffix(tmp_path:
     )
 
     assert match.matches == {(0, 0): output}
+
+
+def test_scan_orders_frames_and_outputs_deterministically(tmp_path: Path):
+    run_dir, frames_dir, prompts_file, output_dir, _ = _scan(tmp_path)
+    (frames_dir / "outfit_02_black_top.webp").write_bytes(b"second-frame")
+    output_a = output_dir / "a.mp4"
+    output_b = output_dir / "z.mp4"
+    output_a.write_bytes(b"a")
+    output_b.write_bytes(b"z")
+
+    scan = scan_inputs(run_dir, frames_dir, prompts_file, output_dir)
+
+    assert [path.name for path in scan.frames] == ["outfit_01_pink_dress.png", "outfit_02_black_top.webp"]
+    assert [path.name for path in scan.outputs] == ["a.mp4", "z.mp4"]
 
 
 def test_matching_marks_shared_filename_as_ambiguous_for_each_job(tmp_path: Path):
@@ -197,6 +231,29 @@ def test_apply_recovery_backups_db_and_creates_matched_done_job(tmp_path: Path):
     assert job["status"] == "DONE"
     assert job["output_file"] == str(next(iter(match.matches.values())))
     assert prompt["prompt_text"] == scan.prompts[0].prompt_text
+
+
+def test_backup_is_taken_before_schema_migration(tmp_path: Path):
+    scan, match, recovery_input = _prepared_recovery(tmp_path)
+    database_path = tmp_path / "app.db"
+    db = Database(database_path)
+    db.initialize()
+    with db.connect() as conn:
+        conn.execute("ALTER TABLE jobs DROP COLUMN rendered_prompt")
+        conn.execute("PRAGMA user_version = 1")
+    preview = preview_recovery(scan, match, recovery_input)
+
+    result = apply_recovery(database_path, preview)
+
+    assert result.backup_path is not None
+    with sqlite3.connect(result.backup_path) as backup:
+        legacy_columns = {row[1] for row in backup.execute("PRAGMA table_info(jobs)")}
+        assert "rendered_prompt" not in legacy_columns
+        assert backup.execute("PRAGMA user_version").fetchone()[0] == 1
+    with db.connect() as conn:
+        current_columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+        assert "rendered_prompt" in current_columns
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
 
 
 def test_apply_recovery_rejects_an_identical_campaign(tmp_path: Path):
