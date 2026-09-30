@@ -163,7 +163,14 @@ class CampaignRepository:
     def retry_job(self, job_id: int) -> None:
         with self.db.connect() as conn:
             conn.execute(
-                "UPDATE jobs SET status = 'RETRY_WAIT', last_error = NULL, updated_at = ? WHERE id = ?",
+                """
+                UPDATE jobs
+                SET status = 'RETRY_WAIT', workflow_id = NULL, artifact_url = NULL, output_file = NULL,
+                    idempotency_key = idempotency_key || ':retry:' || (attempt_count + 1),
+                    last_error = NULL, remote_completed_at = NULL, downloaded_at = NULL,
+                    completed_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
                 (utc_now_iso(), job_id),
             )
 

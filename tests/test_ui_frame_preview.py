@@ -89,6 +89,33 @@ def test_wavespeed_event_handler_belongs_to_main_window(tmp_path: Path):
     assert "_handle_wavespeed_event" in type(window).__dict__
 
 
+def test_completed_campaign_job_exposes_retry_button(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    campaign_id = repo.insert_campaign({
+        "name": "Retry Campaign", "status": "READY", "model_id": "wan22", "model_name": "WAN 2.2",
+        "frames_folder": str(tmp_path), "prompts_source": "", "output_folder": str(tmp_path / "out"),
+        "filename_template": "{outfit}.mp4", "organization_mode": "flat", "concurrency": 1,
+        "settings_json": "{}",
+    })
+    frame_id = repo.insert_frame(campaign_id, "frame.png", "frame.png", "Blue Test", "sha")
+    prompt_id = repo.insert_prompt(campaign_id, "P01", "One", "Prompt")
+    job_id = repo.insert_job(campaign_id, frame_id, prompt_id, 1, "job-key")
+    repo.set_job_status(job_id, "DONE")
+    window = MainWindow(repo, SogniClient(""), ApiKeyStore(tmp_path / "key.txt"),
+                        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+                        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+                        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"))
+    window.current_campaign_id = campaign_id
+
+    window._refresh_tables()
+
+    assert window.jobs_table.cellWidget(0, 6).text() == "Reintentar"
+    assert window.sogni_queue_table.cellWidget(0, 6).text() == "Reintentar"
+
+
 def test_seedance_and_flux_tabs_build_model_specific_payloads(tmp_path: Path):
     _app()
     db = Database(tmp_path / "app.db")

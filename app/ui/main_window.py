@@ -1851,7 +1851,7 @@ class MainWindow(QMainWindow):
                 job,
                 [frame.filename, prompt.prompt_name, campaign.model_name],
             )
-            if job.status == "FAILED":
+            if job.status in {"FAILED", "DONE"}:
                 retry = QPushButton("Reintentar")
                 retry.clicked.connect(lambda checked=False, job_id=job.id: self._retry_job(job_id))
                 self.jobs_table.setCellWidget(row, 6, retry)
@@ -1865,7 +1865,7 @@ class MainWindow(QMainWindow):
         ]
         for column, value in enumerate(values):
             self._set_item(table, row, column, value, job.id, editable=False)
-        if job.status == "FAILED":
+        if job.status in {"FAILED", "DONE"}:
             retry = QPushButton("Reintentar")
             retry.clicked.connect(lambda checked=False, job_id=job.id: self._retry_job(job_id))
             table.setCellWidget(row, 6, retry)

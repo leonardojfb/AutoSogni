@@ -129,6 +129,46 @@ def test_delete_pending_job_is_scoped_and_rejects_started_jobs(tmp_path: Path):
     assert repo.count_jobs(campaigns[1].id) == 0
 
 
+def test_retry_completed_job_clears_previous_generation_state(tmp_path: Path):
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    (frames_dir / "one.png").write_bytes(b"one")
+    prompt_source = tmp_path / "prompts.json"
+    prompt_source.write_text('[{"id":"P01","name":"One","text":"Prompt"}]', encoding="utf-8")
+    campaign = CampaignManager(repo).create_campaign(
+        name="Retry", frames_folder=frames_dir, prompts_source=prompt_source,
+        output_folder=tmp_path / "out",
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={},
+    )
+    job = repo.list_jobs(campaign.id)[0]
+    with db.connect() as conn:
+        conn.execute(
+            """UPDATE jobs SET status='DONE', workflow_id='old-workflow', artifact_url='old-artifact',
+               output_file='old-output.mp4', last_error='old-error', completed_at='old-time',
+               downloaded_at='old-time', remote_completed_at='old-time', attempt_count=2 WHERE id=?""",
+            (job.id,),
+        )
+
+    repo.retry_job(job.id)
+
+    retried = repo.get_job(job.id)
+    assert retried.status == "RETRY_WAIT"
+    assert retried.workflow_id is None
+    assert retried.artifact_url is None
+    assert retried.output_file is None
+    assert retried.last_error is None
+    with db.connect() as conn:
+        timestamps = conn.execute(
+            "SELECT completed_at, downloaded_at, remote_completed_at FROM jobs WHERE id=?", (job.id,)
+        ).fetchone()
+    assert tuple(timestamps) == (None, None, None)
+    assert retried.idempotency_key != job.idempotency_key
+
+
 def test_add_jobs_to_existing_campaign_keeps_campaign_and_orders_jobs_after_existing(tmp_path: Path):
     frames_dir = tmp_path / "frames"
     frames_dir.mkdir()
