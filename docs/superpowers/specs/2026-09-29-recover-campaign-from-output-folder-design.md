@@ -35,9 +35,10 @@ outputs are missing.
    become `DONE`; all other matrix jobs become `PENDING`.
 5. It displays the proposed campaign, match counts, unmatched videos, and
    pending jobs. No persistent change occurs until the user confirms.
-6. On confirmation, it backs up the target SQLite database, then inserts the
-   campaign, frames, prompts, and full Frame × Prompt job matrix in one
-   transaction. It records matched output paths and completion timestamps.
+6. On confirmation, it backs up the target SQLite database before schema
+   initialization or any other database write, then inserts the campaign,
+   frames, prompts, and full Frame × Prompt job matrix in one transaction. It
+   records matched output paths and completion timestamps.
 7. The utility reports the database path and recovered campaign ID so the user
    can verify it in AutoSogni.
 
@@ -62,9 +63,12 @@ with both a source run and the corrected packaged application.
 ## Safety and failure behavior
 
 - Scanning is read-only. Applying recovery requires an explicit confirmation.
+- The utility tells the user to close AutoSogni before applying, avoiding
+  concurrent edits to the same SQLite database.
 - The utility never overwrites or deletes source media, prompts, outputs, or an
   existing campaign.
-- A SQLite backup is created before the recovery transaction.
+- A SQLite backup is created before schema initialization or the recovery
+  transaction.
 - Input validation or mapping errors abort before writing. A database error
   rolls back the transaction and leaves the backup available.
 - Ambiguous filename matches are reported and left pending; the utility does
@@ -78,6 +82,7 @@ with both a source run and the corrected packaged application.
 - Only uniquely matched existing videos are marked `DONE` and linked to jobs.
 - Unmatched combinations remain `PENDING` and can be resumed from AutoSogni.
 - The dry run produces a clear report and causes no database changes.
-- Applying recovery creates a backup and a single complete campaign transaction.
+- Applying recovery creates a backup before any database write and a single
+  complete campaign transaction.
 - The standalone Windows executable starts and uses the same persistent
   database path as the packaged application.
