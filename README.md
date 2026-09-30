@@ -11,6 +11,17 @@ py -m app.main
 
 Set `SOGNI_API_KEY` or save it in the Settings tab. The app stores local state in `data/app.db`.
 
+## Recover an older campaign
+
+Use `RecuperarCampana.bat` for the interactive recovery utility, or run
+`python scripts/recover_campaign.py --help` for command-line options. Provide
+the original frame folder, prompt source file, and output folder. The tool
+previews matches without changing the database; in interactive mode, type
+`RECUPERAR` to apply. It marks uniquely matched videos as `DONE`, leaves
+unmatched jobs `PENDING`, and creates a SQLite backup before writing. Supply
+the original model ID/name and settings JSON so pending jobs can be resumed
+with the intended configuration.
+
 ## Current Flow
 
 1. Fetch video models from Sogni.

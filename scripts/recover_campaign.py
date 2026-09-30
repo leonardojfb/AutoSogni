@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import sys
+import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,7 +95,10 @@ def preview_recovery(
         raise ValueError("Filename template is required.")
     if campaign.organization_mode not in {"flat", "by_outfit"}:
         raise ValueError("Organization mode must be 'flat' or 'by_outfit'.")
-    settings = json.loads(campaign.settings_json)
+    try:
+        settings = json.loads(campaign.settings_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Generation settings must be valid JSON.") from exc
     if not isinstance(settings, dict):
         raise ValueError("Generation settings must be a JSON object.")
     total = len(scan.frames) * len(scan.prompts)
@@ -225,6 +229,191 @@ def _reject_duplicate_campaign(conn: sqlite3.Connection, campaign: RecoveryCampa
         )
         if existing == identity:
             raise ValueError("An identical campaign already exists in the selected database.")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Rebuild an AutoSogni campaign from its original frames, prompts, and generated videos."
+    )
+    parser.add_argument("--run-folder", type=Path)
+    parser.add_argument("--frames-folder", type=Path)
+    parser.add_argument("--prompts-file", type=Path)
+    parser.add_argument("--output-folder", type=Path)
+    parser.add_argument("--name")
+    parser.add_argument("--model-id")
+    parser.add_argument("--model-name")
+    parser.add_argument("--settings-json")
+    parser.add_argument("--template", default="{outfit}__{prompt_id}_{prompt_name}.mp4")
+    parser.add_argument("--organization", choices=("by_outfit", "flat"), default="by_outfit")
+    parser.add_argument("--database", type=Path)
+    parser.add_argument("--apply", action="store_true", help="Write the recovery after showing its preview.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if not argv:
+            return _run_interactive()
+        required = (
+            "run_folder", "frames_folder", "prompts_file", "output_folder", "name",
+            "model_id", "model_name", "settings_json",
+        )
+        missing = [name.replace("_", "-") for name in required if getattr(args, name) is None]
+        if missing:
+            parser.error(f"Missing required options: {', '.join('--' + name for name in missing)}")
+        return _run_recovery(
+            run_dir=args.run_folder,
+            frames_dir=args.frames_folder,
+            prompts_file=args.prompts_file,
+            output_dir=args.output_folder,
+            name=args.name,
+            model_id=args.model_id,
+            model_name=args.model_name,
+            settings_json=args.settings_json,
+            filename_template=args.template,
+            organization_mode=args.organization,
+            database_override=args.database,
+            apply=args.apply,
+            confirm=False,
+        )
+    except (OSError, ValueError, sqlite3.Error, json.JSONDecodeError) as exc:
+        print(f"Recovery stopped: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_interactive() -> int:
+    print("AutoSogni campaign recovery (scan first; nothing is saved until you confirm).")
+    run_dir = _ask_path("Execution folder", required=True)
+    default_frames = run_dir / "frames"
+    frame_candidates = [
+        path for path in run_dir.rglob("*")
+        if path.is_dir() and any(child.is_file() and child.suffix.lower() in IMAGE_EXTENSIONS for child in path.iterdir())
+    ]
+    frames_dir = _choose_path("Frames folder", default_frames if default_frames.is_dir() else None, frame_candidates)
+    prompt_candidates = [
+        path for path in run_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in {".json", ".csv", ".txt"}
+        and "prompt" in path.stem.casefold()
+    ]
+    prompts_file = _choose_path("Prompt source file", None, prompt_candidates)
+    output_default = run_dir / "output"
+    output_dir = _ask_path("Output folder", required=True, default=output_default if output_default.is_dir() else run_dir)
+    name = input(f"Campaign name [{run_dir.name}]: ").strip() or run_dir.name
+    model_id = _ask_text("Model ID")
+    model_name = _ask_text("Model name")
+    settings_json = _ask_text("Original generation settings as JSON object")
+    filename_template = input("Output filename template [{outfit}__{prompt_id}_{prompt_name}.mp4]: ").strip()
+    filename_template = filename_template or "{outfit}__{prompt_id}_{prompt_name}.mp4"
+    organization_mode = input("Organization mode [by_outfit/flat] (default by_outfit): ").strip() or "by_outfit"
+    if organization_mode not in {"by_outfit", "flat"}:
+        raise ValueError("Organization mode must be 'by_outfit' or 'flat'.")
+    database_answer = input(f"Database path [{resolve_database_path()}]: ").strip()
+    database_override = Path(database_answer) if database_answer else None
+    return _run_recovery(
+        run_dir, frames_dir, prompts_file, output_dir, name, model_id, model_name,
+        settings_json, filename_template, organization_mode, database_override,
+        apply=False, confirm=True,
+    )
+
+
+def _ask_path(label: str, required: bool, default: Path | None = None) -> Path:
+    suffix = f" [{default}]" if default else ""
+    while True:
+        value = input(f"{label}{suffix}: ").strip().strip('"')
+        if value:
+            return Path(value).expanduser().resolve()
+        if default:
+            return default.resolve()
+        if not required:
+            return Path()
+        print(f"{label} is required.")
+
+
+def _choose_path(label: str, default: Path | None, candidates: list[Path]) -> Path:
+    if default is not None:
+        return default.resolve()
+    unique = sorted(set(candidates), key=lambda path: str(path).casefold())
+    if len(unique) == 1:
+        print(f"{label}: {unique[0]}")
+        return unique[0].resolve()
+    if unique:
+        print(f"Found multiple candidates for {label}:")
+        for candidate in unique:
+            print(f"  {candidate}")
+    return _ask_path(label, required=True)
+
+
+def _ask_text(label: str) -> str:
+    while True:
+        value = input(f"{label}: ").strip()
+        if value:
+            return value
+        print(f"{label} is required.")
+
+
+def _run_recovery(
+    run_dir: Path,
+    frames_dir: Path,
+    prompts_file: Path,
+    output_dir: Path,
+    name: str,
+    model_id: str,
+    model_name: str,
+    settings_json: str,
+    filename_template: str,
+    organization_mode: str,
+    database_override: Path | None,
+    apply: bool,
+    confirm: bool,
+) -> int:
+    scan = scan_inputs(run_dir, frames_dir, prompts_file, output_dir)
+    matches = match_outputs(scan, filename_template, organization_mode, name, model_name)
+    campaign = RecoveryCampaignInput(
+        name, model_id, model_name, frames_dir, prompts_file, output_dir,
+        filename_template, organization_mode, settings_json,
+    )
+    preview = preview_recovery(scan, matches, campaign)
+    database_path = resolve_database_path(database_override)
+    print(f"\nCampaign: {campaign.name}")
+    print(f"Model: {campaign.model_name} ({campaign.model_id})")
+    print(f"Frames: {len(scan.frames)} | Prompts: {len(scan.prompts)}")
+    print(f"Total jobs: {preview.total_jobs}")
+    print(f"Completed matches: {preview.completed_jobs}")
+    print(f"Pending jobs: {preview.pending_jobs}")
+    print(f"Ambiguous jobs: {len(matches.ambiguous_jobs)}")
+    print(f"Unmatched videos: {len(matches.unmatched_outputs)}")
+    print(f"Database: {database_path}")
+    if matches.ambiguous_jobs:
+        for (frame_index, prompt_index), candidates in matches.ambiguous_jobs.items():
+            print(f"  Ambiguous frame {frame_index + 1} / prompt {prompt_index + 1}: {len(candidates)} videos")
+    if matches.unmatched_outputs:
+        for path in matches.unmatched_outputs[:10]:
+            print(f"  Unmatched video: {path}")
+        if len(matches.unmatched_outputs) > 10:
+            print(f"  ... and {len(matches.unmatched_outputs) - 10} more")
+
+    if confirm:
+        answer = input("Type RECUPERAR to create this campaign; anything else cancels: ").strip()
+        if answer != "RECUPERAR":
+            print("Cancelled. No database changes were made.")
+            return 0
+    elif not apply:
+        print("Preview only. Re-run with --apply to save this campaign.")
+        return 0
+
+    result = apply_recovery(database_path, preview)
+    print(f"Campaign ID: {result.campaign_id}")
+    print(f"Saved jobs: {result.completed_jobs} DONE, {result.pending_jobs} PENDING")
+    if result.backup_path:
+        print(f"Database backup: {result.backup_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 
