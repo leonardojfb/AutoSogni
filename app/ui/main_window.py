@@ -17,6 +17,10 @@ from app.sogni.loras import validate_lora_selection
 from app.ui.sogni_loras import SogniLoraDialog
 from app.utils.paths import data_dir
 from app.wavespeed.client import WaveSpeedClient
+from app.byteplus.client import BytePlusClient
+from app.byteplus.history import BytePlusHistoryStore
+from app.byteplus.queue import BytePlusCampaign, BytePlusCampaignStore, BytePlusQueueItem, QueueStatus
+from app.ui.byteplus_queue import BytePlusQueueWidget
 from app.wavespeed.history import WaveSpeedHistoryStore
 from app.wavespeed.flux_queue import FluxCampaign, FluxCampaignStore, FluxQueue, FluxQueueItem, FluxQueueRunner
 from app.wavespeed.queue import (
@@ -90,6 +94,9 @@ class MainWindow(QMainWindow):
         wavespeed_campaign_store=None,
         wavespeed_queue_store=None,
         flux_campaign_store=None,
+        byteplus_client=None,
+        byteplus_key_store=None,
+        byteplus_campaign_store=None,
     ) -> None:
         super().__init__()
         self.repo = repo
@@ -101,6 +108,11 @@ class MainWindow(QMainWindow):
         self.wavespeed_queue_store = wavespeed_queue_store or WaveSpeedQueueStore()
         self.wavespeed_campaign_store = wavespeed_campaign_store or WaveSpeedCampaignStore()
         self.flux_campaign_store = flux_campaign_store or FluxCampaignStore()
+        self.byteplus_key_store = byteplus_key_store or ApiKeyStore(data_dir() / "byteplus_api_key.txt")
+        self.byteplus = byteplus_client or BytePlusClient(self.byteplus_key_store.get())
+        self.byteplus_history = BytePlusHistoryStore()
+        self.byteplus_campaign_store = byteplus_campaign_store or BytePlusCampaignStore()
+        self._byteplus_campaign_id = None
         self._flux_campaign_id: str | None = None
         self._flux_campaign_name = "Nueva campaña Flux"
         self._flux_campaign_persist_lock = threading.Lock()
@@ -146,6 +158,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._jobs_tab(), "Jobs")
         self.tabs.addTab(self._settings_tab(), "Settings")
         self.tabs.addTab(self._wavespeed_tab(), "WaveSpeed")
+        self.tabs.addTab(self._byteplus_tab(), "BytePlus")
         self.tabs.addTab(self._images_tab(), "Imágenes")
         layout.addWidget(self.tabs)
         self.setCentralWidget(root)
@@ -494,6 +507,62 @@ class MainWindow(QMainWindow):
         self.wavespeed_sync_check.setVisible(not seedance)
         self.wavespeed_base64_check.setVisible(not seedance)
         self.wavespeed_status_label.setText("Listo. Seedance acepta solo texto o referencias." if seedance else "Listo. Agregá al menos una referencia.")
+
+    def _byteplus_tab(self) -> QWidget:
+        self.byteplus_tab = QWidget(); layout = QVBoxLayout(self.byteplus_tab)
+        connection = QGroupBox("BytePlus ModelArk · conexión directa"); form = QGridLayout(connection)
+        self.byteplus_api_key_edit = QLineEdit(self.byteplus_key_store.get()); self.byteplus_api_key_edit.setEchoMode(QLineEdit.Password)
+        save = QPushButton("Guardar clave"); save.clicked.connect(self._byteplus_save_key)
+        form.addWidget(QLabel("API key"), 0, 0); form.addWidget(self.byteplus_api_key_edit, 0, 1); form.addWidget(save, 0, 2); form.addWidget(QLabel("Modelo fijo: dreamina-seedance-2-0-260128"), 1, 0, 1, 3); layout.addWidget(connection)
+        self.byteplus_mode_combo = QComboBox(); self.byteplus_mode_combo.addItems(["Texto a video", "Imagen primer frame", "Imagen primer y último frame", "Referencias omni", "Editar video", "Extender video"])
+        self.byteplus_prompt_edit = QTextEdit(); self.byteplus_prompt_edit.setPlaceholderText("Prompt Seedance 2.0")
+        self.byteplus_urls_edit = QTextEdit(); self.byteplus_urls_edit.setPlaceholderText("URLs públicas, una por línea")
+        layout.addWidget(self.byteplus_mode_combo); layout.addWidget(self.byteplus_prompt_edit); layout.addWidget(self.byteplus_urls_edit)
+        self.byteplus_resolution_combo = QComboBox(); self.byteplus_resolution_combo.addItems(["480p", "720p", "1080p", "4k"])
+        self.byteplus_ratio_combo = QComboBox(); self.byteplus_ratio_combo.addItems(["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]); self.byteplus_ratio_combo.setCurrentText("16:9")
+        self.byteplus_duration_spin = QSpinBox(); self.byteplus_duration_spin.setRange(4, 15); self.byteplus_duration_spin.setValue(5)
+        self.byteplus_audio_check = QCheckBox("Generar audio"); self.byteplus_audio_check.setChecked(True); self.byteplus_watermark_check = QCheckBox("Watermark"); self.byteplus_last_frame_check = QCheckBox("Devolver último frame")
+        controls = QHBoxLayout(); [controls.addWidget(widget) for widget in (self.byteplus_resolution_combo, self.byteplus_ratio_combo, self.byteplus_duration_spin, self.byteplus_audio_check, self.byteplus_watermark_check, self.byteplus_last_frame_check)]; layout.addLayout(controls)
+        self.byteplus_status_label = QLabel("Listo."); generate = QPushButton("Generar video"); generate.clicked.connect(self._byteplus_generate); add = QPushButton("Agregar a la cola"); add.clicked.connect(self._byteplus_add_queue); layout.addWidget(generate); layout.addWidget(add); layout.addWidget(self.byteplus_status_label)
+        self.byteplus_queue_widget = BytePlusQueueWidget(); self.byteplus_queue_widget.start_requested.connect(self._byteplus_run_queue); layout.addWidget(self.byteplus_queue_widget); self._load_byteplus_campaign(); return self.byteplus_tab
+
+    def _byteplus_snapshot(self):
+        modes = ("text", "first_frame", "first_last_frame", "omni", "edit", "extend"); mode = modes[self.byteplus_mode_combo.currentIndex()]; urls = [line.strip() for line in self.byteplus_urls_edit.toPlainText().splitlines() if line.strip()]
+        snapshot = {"mode": mode, "prompt": self.byteplus_prompt_edit.toPlainText(), "resolution": self.byteplus_resolution_combo.currentText(), "ratio": self.byteplus_ratio_combo.currentText(), "duration": self.byteplus_duration_spin.value(), "generate_audio": self.byteplus_audio_check.isChecked(), "watermark": self.byteplus_watermark_check.isChecked(), "return_last_frame": self.byteplus_last_frame_check.isChecked()}
+        if mode == "first_frame": snapshot["first_frame_url"] = urls[0] if urls else ""
+        elif mode == "first_last_frame": snapshot.update({"first_frame_url": urls[0] if urls else "", "last_frame_url": urls[1] if len(urls) > 1 else ""})
+        elif mode == "omni": snapshot["reference_images"] = urls
+        elif mode in {"edit", "extend"}: snapshot["reference_video_url"] = urls[0] if urls else ""
+        return snapshot
+
+    def _byteplus_save_key(self):
+        self.byteplus_key_store.save(self.byteplus_api_key_edit.text()); self.byteplus.api_key = self.byteplus_api_key_edit.text().strip(); self.byteplus_status_label.setText("Clave BytePlus guardada localmente.")
+    def _load_byteplus_campaign(self):
+        campaigns, active = self.byteplus_campaign_store.load(); campaign = next((item for item in campaigns if item.campaign_id == active), None) or (campaigns[0] if campaigns else BytePlusCampaign()); self._byteplus_campaign_id = campaign.campaign_id; self.byteplus_campaign_store.save(campaign, active=True); self.byteplus_queue_widget.load_queue(campaign.queue)
+    def _save_byteplus_queue(self): self.byteplus_campaign_store.save(BytePlusCampaign(self._byteplus_campaign_id or "", "Nueva campaña BytePlus", self.byteplus_queue_widget.queue()), active=True)
+    def _byteplus_add_queue(self):
+        try:
+            from app.byteplus.validation import build_task_payload
+            snapshot = self._byteplus_snapshot(); build_task_payload(snapshot); item = BytePlusQueueItem(snapshot=snapshot); self.byteplus_queue_widget.queue().items.append(item); self.byteplus_queue_widget.add_item(item); self._save_byteplus_queue(); self.byteplus_status_label.setText("Solicitud agregada a la cola BytePlus.")
+        except Exception as exc: self.byteplus_status_label.setText(f"Error: {exc}")
+    def _byteplus_generate(self):
+        try:
+            task = self.byteplus.submit(self._byteplus_snapshot()); result = self.byteplus.poll_task(task.id)
+            if result.status != "succeeded" or not result.video_url: raise RuntimeError(result.error or f"La tarea terminó en {result.status}.")
+            output = data_dir() / "byteplus_outputs" / f"byteplus_{result.id}.mp4"; self.byteplus.download_output(result.video_url, output)
+            if result.last_frame_url: self.byteplus.download_output(result.last_frame_url, output.with_suffix(".last-frame.png"))
+            self.byteplus_history.add({"task_id": result.id, "status": result.status, "output_file": str(output), "prompt": self.byteplus_prompt_edit.toPlainText()}); self.byteplus_status_label.setText(f"Video guardado: {output}")
+        except Exception as exc: self.byteplus_status_label.setText(f"Error: {exc}")
+    def _byteplus_run_queue(self):
+        for item in self.byteplus_queue_widget.queue().items:
+            if item.status == QueueStatus.PENDING:
+                try:
+                    item.status = QueueStatus.RUNNING; task = self.byteplus.get_task(item.task_id) if item.task_id else self.byteplus.submit(item.snapshot); item.task_id = task.id; result = self.byteplus.poll_task(task.id); item.status = QueueStatus.COMPLETED if result.status == "succeeded" else QueueStatus.FAILED; item.error = result.error
+                    if item.status == QueueStatus.COMPLETED and result.video_url:
+                        output = data_dir() / "byteplus_outputs" / f"byteplus_{result.id}.mp4"; item.output_file = str(self.byteplus.download_output(result.video_url, output)); self.byteplus_history.add({"task_id": result.id, "status": result.status, "output_file": item.output_file, "prompt": item.snapshot.get("prompt", "")})
+                except Exception as exc: item.status = QueueStatus.FAILED; item.error = str(exc)
+                self._save_byteplus_queue()
+        self.byteplus_queue_widget.load_queue(self.byteplus_queue_widget.queue())
 
     def _images_tab(self) -> QWidget:
         page = QWidget()
