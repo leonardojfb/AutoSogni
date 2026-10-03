@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from app.core.downloader import Downloader
 from app.core.filename_builder import FilenameBuilder, FilenameContext
 from app.core.model_settings import resolve_job_settings
-from app.core.validators import prepare_minimax_h3_prompt
+from app.core.validators import prepare_minimax_h3_prompt, validate_minimax_h3_r2v_prompt
 from app.database.repositories import CampaignRepository
 from app.sogni.client import SogniRateLimitError, _detect_image_content_type
 
@@ -43,7 +43,9 @@ class JobRunner:
     def run(self, job_id: int) -> None:
         job, frame, prompt, campaign = self.repo.get_job_bundle(job_id)
         log.info("Starting job %s: campaign=%s frame=%s prompt=%s", job_id, campaign.id, frame.filename, prompt.prompt_code)
-        campaign_settings = json.loads(campaign.settings_json or "{}")
+        campaign_settings = json.loads(job.settings_json or "{}") or json.loads(campaign.settings_json or "{}")
+        campaign_reference_media = campaign_settings.pop("reference_media", [])
+        reference_media_paths = json.loads(job.reference_media_json or "[]") or campaign_reference_media
         skip_prompt_processing = bool(campaign_settings.pop("skipPromptProcessing", True))
         settings = resolve_job_settings(campaign_settings, prompt.prompt_text)
         output_path = self.filename_builder.build_output_path(
@@ -67,12 +69,22 @@ class JobRunner:
             artifact_url = job.artifact_url
             workflow_id = job.workflow_id
             original_prompt = prompt.prompt_text
-            rendered_prompt = prepare_minimax_h3_prompt(original_prompt, campaign.model_id, language="English") if "minimax-h3" in campaign.model_id.lower() else original_prompt
+            is_r2v = _is_minimax_r2v(campaign.model_id)
+            rendered_prompt = (validate_minimax_h3_r2v_prompt(original_prompt) if is_r2v else
+                               prepare_minimax_h3_prompt(original_prompt, campaign.model_id, language="English") if "minimax-h3" in campaign.model_id.lower() else original_prompt)
             self.repo.save_rendered_prompt(job.id, rendered_prompt)
             if not artifact_url:
                 if not workflow_id:
                     self.repo.set_job_status(job.id, "UPLOADING_FRAME")
-                    media_reference = self._media_reference_for_frame(frame.sha256, job.id, Path(frame.file_path))
+                    uploaded_references = None
+                    if is_r2v:
+                        paths = [Path(path) for path in reference_media_paths]
+                        if not paths or any(not path.is_file() for path in paths):
+                            raise ValueError("Faltan archivos locales de referencia guardados para esta campaña R2V.")
+                        uploaded_references = [self.sogni.upload_reference_media(str(job.id), path) for path in paths]
+                        media_reference = None
+                    else:
+                        media_reference = self._media_reference_for_frame(frame.sha256, job.id, Path(frame.file_path))
                     log.debug("Job %s media_reference=%s", job.id, media_reference)
                     self.repo.set_job_status(job.id, "SUBMITTING")
                     log.info("Submitting workflow for job %s with idempotency=%s", job.id, job.idempotency_key)
@@ -84,6 +96,7 @@ class JobRunner:
                         media_reference=media_reference,
                         idempotency_key=job.idempotency_key,
                         skip_prompt_processing=skip_prompt_processing,
+                        media_references=uploaded_references,
                     )
                     log.info("Workflow response for job %s: %s", job.id, json.dumps(workflow, ensure_ascii=False, indent=2, default=str))
                     workflow_id = workflow.get("workflowId") or workflow.get("id")
@@ -137,6 +150,11 @@ class JobRunner:
             if artifact_url:
                 return artifact_url
             if status == "waiting_for_user":
+                if _workflow_failure_is_non_retryable(workflow):
+                    raise SogniWorkflowFailure(
+                        f"Sogni workflow stopped on a non-retryable step failure: workflow_id={workflow_id} "
+                        f"payload={json.dumps(workflow, ensure_ascii=False, indent=2, default=str)}"
+                    )
                 if workflow.get("awaitingCostApproval"):
                     raise RuntimeError(
                         f"Sogni workflow is waiting for cost approval: workflow_id={workflow_id} "
@@ -169,6 +187,11 @@ def extract_artifact_url(workflow: dict[str, Any]) -> str | None:
         if url:
             return str(url)
     return None
+
+
+def _is_minimax_r2v(model_id: str) -> bool:
+    normalized = model_id.lower()
+    return "minimax-h3" in normalized and ("_r2v" in normalized or "-r2v" in normalized)
 
 
 def _presigned_media_reference_is_fresh(media_reference: dict[str, Any], safety_seconds: int = 300) -> bool:

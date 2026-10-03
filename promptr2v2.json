@@ -1,0 +1,25 @@
+[
+{
+"type": "video",
+"network": "fast",
+"modelId": "minimax-h3-ref2va-fp8_r2v",
+"positivePrompt": "subject_definitions:\n<Subject 1>: The woman (S1), face/hair from <Picture 1>, body from <Picture 2>.\n<Subject 2>: Source performance from <Video 1> (pose, expressions, motion), excluding identity.\n<Subject 3>: Source wardrobe from <Video 1> (pink t-shirt and shorts outfit).\n<Subject 4>: Source environment/lighting from <Video 1> (nighttime outdoor park with blue-lit fountain).\n<Video 1>: Master reference for performance, wardrobe, environment, and camera.\n<Audio 1>: Synchronized audio with music snippet and sound effects.\n\nsummary:\n[video editing + reference generation + audio reuse]\nDuration: approximately 9.2 seconds.\nReconstruct <Video 1> replacing identity with <Picture 1> and <Picture 2>, preserving all other source elements.\n\nretention_analysis:\n<Subject 1>: fully_preserved — target identity remains stable.\n<Subject 2>: attribute_transfer — transfer <Video 1> performance.\n<Subject 3>: fully_preserved — preserve <Video 1> wardrobe.\n<Subject 4>: fully_preserved — preserve <Video 1> environment.\n<Video 1>: partially_preserved — preserve scene while replacing identity.\n<Audio 1>: fully_copy\n\ndetailed_description:\n[Shot 1]\nSeated by a blue-lit fountain at night, The woman (S1) looks up from her phone at the camera. An off-camera hand holds a colorful spiral lollipop, which she licks while opening her mouth wide. She then smiles and laughs towards the camera.\n\noverall_soundscape:\nScream sound effect and ambient park noise preserved via <Audio 1>.\n\nnon_diegetic_music:\nDramatic classical music excerpt preserved via <Audio 1>.",
+"numberOfMedia": 1,
+"referenceImage": "IMAGE_1",
+"contextImages": [
+"IMAGE_2"
+],
+"referenceVideo": "VIDEO_1",
+"referenceVideoDurations": [
+"VIDEO_1_DURATION"
+],
+"duration": "VIDEO_1_DURATION",
+"width": 768,
+"height": 1344,
+"generateAudio": true,
+"tokenType": "spark",
+"id": "P02",
+"name": "MiniMax H3 R2V - Blue Fountain Lollipop",
+"text": "subject_definitions:\n<Subject 1>: The woman (S1), face/hair from <Picture 1>, body from <Picture 2>.\n<Subject 2>: Source performance from <Video 1> (pose, expressions, motion), excluding identity.\n<Subject 3>: Source wardrobe from <Video 1> (pink t-shirt and shorts outfit).\n<Subject 4>: Source environment/lighting from <Video 1> (nighttime outdoor park with blue-lit fountain).\n<Video 1>: Master reference for performance, wardrobe, environment, and camera.\n<Audio 1>: Synchronized audio with music snippet and sound effects.\n\nsummary:\n[video editing + reference generation + audio reuse]\nDuration: approximately 9.2 seconds.\nReconstruct <Video 1> replacing identity with <Picture 1> and <Picture 2>, preserving all other source elements.\n\nretention_analysis:\n<Subject 1>: fully_preserved — target identity remains stable.\n<Subject 2>: attribute_transfer — transfer <Video 1> performance.\n<Subject 3>: fully_preserved — preserve <Video 1> wardrobe.\n<Subject 4>: fully_preserved — preserve <Video 1> environment.\n<Video 1>: partially_preserved — preserve scene while replacing identity.\n<Audio 1>: fully_copy\n\ndetailed_description:\n[Shot 1]\nSeated by a blue-lit fountain at night, The woman (S1) looks up from her phone at the camera. An off-camera hand holds a colorful spiral lollipop, which she licks while opening her mouth wide. She then smiles and laughs towards the camera.\n\noverall_soundscape:\nScream sound effect and ambient park noise preserved via <Audio 1>.\n\nnon_diegetic_music:\nDramatic classical music excerpt preserved via <Audio 1>."
+}
+]

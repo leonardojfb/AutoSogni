@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-DB_VERSION = 2
+DB_VERSION = 4
 
 
 class Database:
@@ -30,6 +30,10 @@ class Database:
 
         if "rendered_prompt" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN rendered_prompt TEXT")
+        if "reference_media_json" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN reference_media_json TEXT NOT NULL DEFAULT '[]'")
+        if "settings_json" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}'")
 
         if version < DB_VERSION:
             conn.execute(f"PRAGMA user_version = {DB_VERSION}")
@@ -86,6 +90,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     artifact_url TEXT,
     output_file TEXT,
     rendered_prompt TEXT,
+    reference_media_json TEXT NOT NULL DEFAULT '[]',
+    settings_json TEXT NOT NULL DEFAULT '{}',
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

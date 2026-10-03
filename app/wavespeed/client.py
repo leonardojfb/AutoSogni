@@ -9,8 +9,8 @@ import httpx
 
 from app.wavespeed.schemas import WaveSpeedPrediction
 from app.wavespeed.validation import (
-    MODEL_ID, SEEDANCE_MODEL_ID, FLUX_MODEL_ID, FACE_SWAP_MODEL_ID, TERMINAL_STATUSES,
-    build_seedance_payload, build_flux_payload, build_face_swap_payload, validate_request,
+    MODEL_ID, SEEDANCE_MODEL_ID, SEEDANCE_I2V_SPICY_MODEL_ID, FLUX_MODEL_ID, FACE_SWAP_MODEL_ID, TERMINAL_STATUSES,
+    build_seedance_payload, build_seedance_i2v_spicy_payload, build_flux_payload, build_face_swap_payload, validate_request,
 )
 
 
@@ -94,6 +94,8 @@ class WaveSpeedClient:
             validate_request(payload, webhook_url=webhook_url)
         elif model_id == SEEDANCE_MODEL_ID:
             build_seedance_payload(**payload)
+        elif model_id == SEEDANCE_I2V_SPICY_MODEL_ID:
+            build_seedance_i2v_spicy_payload(**payload)
         elif model_id == FLUX_MODEL_ID:
             build_flux_payload(**payload)
         elif model_id == FACE_SWAP_MODEL_ID:

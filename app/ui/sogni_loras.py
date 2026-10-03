@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
+    QCheckBox, QDialog, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
     QVBoxLayout,
 )
 
 from app.sogni.loras import validate_lora_selection
+from app.ui.numeric_inputs import WheelSafeDoubleSpinBox
 
 
 class _CatalogWorker(QThread):
@@ -33,7 +34,6 @@ class _CatalogWorker(QThread):
                     pass
             self.loaded.emit([], str(exc))
 
-
 class SogniLoraDialog(QDialog):
     def __init__(self, client, model_id: str, selected_loras: list[list], parent=None, *, show_personal=False) -> None:
         super().__init__(parent)
@@ -50,11 +50,13 @@ class SogniLoraDialog(QDialog):
         self.search_edit.setPlaceholderText("Buscar por nombre, efecto o creador")
         self.search_edit.textChanged.connect(self._filter)
         layout.addWidget(self.search_edit)
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["LoRA", "Fuerza", "Descripción"])
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["LoRA", "Fuerza", "Descripción", "Posición"])
         self.table.setColumnWidth(0, 210)
         self.table.setColumnWidth(1, 90)
         self.table.setColumnWidth(2, 420)
+        self.table.setColumnWidth(3, 65)
+        self.table.itemChanged.connect(lambda _item: self._update_positions())
         layout.addWidget(self.table)
         self.status_label = QLabel("Cargando LoRAs comunitarias…")
         layout.addWidget(self.status_label)
@@ -133,6 +135,7 @@ class SogniLoraDialog(QDialog):
             0 if row.get("loraId") in selected else 1,
             list(selected).index(row.get("loraId")) if row.get("loraId") in selected else 0,
         ))
+        self.table.blockSignals(True)
         self.table.setRowCount(0)
         for row in rows:
             row_index = self.table.rowCount()
@@ -145,7 +148,7 @@ class SogniLoraDialog(QDialog):
             ui = row.get("ui") or {}
             details = QTableWidgetItem(row.get("description", "").replace("\n", " "))
             details.setToolTip(row.get("description", ""))
-            strength = QDoubleSpinBox()
+            strength = WheelSafeDoubleSpinBox()
             strength.setDecimals(2)
             strength.setSingleStep(float(ui.get("step") or 0.05))
             strength.setRange(max(0.01, float(ui.get("min", 0))), min(1.0, float(ui.get("max", 1))) if lora_id.startswith("personal-") else float(ui.get("max", 1)))
@@ -153,6 +156,15 @@ class SogniLoraDialog(QDialog):
             self.table.setItem(row_index, 0, item)
             self.table.setCellWidget(row_index, 1, strength)
             self.table.setItem(row_index, 2, details)
+        position = 1
+        for row_index in range(self.table.rowCount()):
+            item = self.table.item(row_index, 0)
+            position_item = QTableWidgetItem(f"#{position}" if item.checkState() == Qt.Checked else "—")
+            position_item.setFlags(position_item.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(row_index, 3, position_item)
+            if item.checkState() == Qt.Checked:
+                position += 1
+        self.table.blockSignals(False)
         self._filter(self.search_edit.text())
         self.save_button.setEnabled(bool(self.catalog))
 
@@ -176,6 +188,21 @@ class SogniLoraDialog(QDialog):
         first.setValue(second_value)
         second.setValue(first_value)
         self.table.selectRow(target)
+        self._update_positions()
+
+    def _update_positions(self) -> None:
+        position = 1
+        self.table.blockSignals(True)
+        try:
+            for row in range(self.table.rowCount()):
+                lora = self.table.item(row, 0)
+                item = QTableWidgetItem(f"#{position}" if lora and lora.checkState() == Qt.Checked else "—")
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(row, 3, item)
+                if lora and lora.checkState() == Qt.Checked:
+                    position += 1
+        finally:
+            self.table.blockSignals(False)
 
     def _import(self) -> None:
         try:

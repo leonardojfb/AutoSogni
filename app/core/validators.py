@@ -8,6 +8,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm"}
 
 _MINIMAX_H3_REQUIRED_FIELDS = (
     "integrated_multimodal_description:",
@@ -30,6 +31,36 @@ def validate_frames_folder(path: Path) -> list[Path]:
     if not frames:
         raise ValueError("Frames folder must contain at least one PNG, JPG, JPEG, or WEBP image.")
     return frames
+
+
+def validate_minimax_reference_files(paths: list[Path]) -> list[Path]:
+    if not paths:
+        raise ValueError("Seleccioná al menos una imagen o video de referencia.")
+    images = [path for path in paths if path.suffix.lower() in IMAGE_EXTENSIONS]
+    videos = [path for path in paths if path.suffix.lower() in VIDEO_EXTENSIONS]
+    unsupported = [path for path in paths if path not in images and path not in videos]
+    if unsupported:
+        raise ValueError("Las referencias deben ser PNG, JPG, JPEG, WEBP, MP4, MOV o WEBM.")
+    if len(images) > 9 or len(videos) > 3 or len(paths) > 12:
+        raise ValueError("MiniMax H3 R2V admite hasta 9 imágenes, 3 videos y 12 referencias en total.")
+    for path in paths:
+        if not path.is_file():
+            raise ValueError(f"No se encontró el archivo de referencia: {path}")
+    return paths
+
+
+def validate_minimax_h3_r2v_prompt(prompt: str) -> str:
+    required = ("subject_definitions:", "summary:", "retention_analysis:", "detailed_description:",
+                "overall_soundscape:", "non_diegetic_music:")
+    normalized = (prompt or "").strip()
+    positions = [normalized.lower().find(field) for field in required]
+    if any(position < 0 for position in positions) or positions != sorted(positions):
+        raise ValueError("Invalid MiniMax H3 R2V prompt: use the six fields in order: " + ", ".join(required))
+    for index, position in enumerate(positions):
+        end = positions[index + 1] if index + 1 < len(positions) else len(normalized)
+        if not normalized[position + len(required[index]):end].strip():
+            raise ValueError(f"Invalid MiniMax H3 R2V prompt: {required[index]} cannot be empty.")
+    return normalized
 
 
 def ensure_output_folder(path: Path) -> None:

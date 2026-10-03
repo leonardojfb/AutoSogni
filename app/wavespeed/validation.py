@@ -6,6 +6,7 @@ from pathlib import Path
 
 MODEL_ID = "alibaba/wan-3.0/reference-to-video"
 SEEDANCE_MODEL_ID = "bytedance/seedance-2.0/text-to-video"
+SEEDANCE_I2V_SPICY_MODEL_ID = "bytedance/seedance-2.0/image-to-video-spicy"
 FLUX_MODEL_ID = "wavespeed-ai/flux-2-klein-9b/edit"
 FACE_SWAP_MODEL_ID = "wavespeed-ai/image-face-swap"
 RESOLUTIONS = ("480p", "720p", "1080p")
@@ -134,7 +135,7 @@ def build_seedance_payload(
     *, prompt: str, reference_images: list[str] | None = None,
     reference_videos: list[str] | None = None, reference_audios: list[str] | None = None,
     resolution: str = "720p", aspect_ratio: str = "16:9", duration: int = 5,
-    enable_web_search: bool = False, generate_audio: bool = True,
+    enable_web_search: bool = False, generate_audio: bool = True, safety_checker: bool = True,
 ) -> dict[str, Any]:
     if not prompt.strip():
         raise ValueError("Prompt is required.")
@@ -156,8 +157,56 @@ def build_seedance_payload(
         "prompt": prompt, "resolution": resolution, "aspect_ratio": aspect_ratio,
         "duration": duration, "enable_web_search": bool(enable_web_search),
         "generate_audio": bool(generate_audio),
+        "safety_checker": bool(safety_checker),
     }
     payload.update({kind: values for kind, values in references.items() if values})
+    return payload
+
+
+def build_seedance_i2v_spicy_payload(
+    *, image: str, prompt: str = "", last_image: str | None = None,
+    aspect_ratio: str = "", resolution: str = "720p", duration: int = 5,
+    generate_audio: bool = True, seed: int | None = None, safety_checker: bool = True,
+) -> dict[str, Any]:
+    image = str(image or "").strip()
+    if not image.startswith(("https://", "http://")):
+        raise ValueError("Seedance Spicy requires a public start-image URL.")
+    if last_image:
+        last_image = str(last_image).strip()
+        if not last_image.startswith(("https://", "http://")):
+            raise ValueError("Seedance Spicy last_image must be a public image URL.")
+    if aspect_ratio and aspect_ratio not in ASPECT_RATIOS + ("21:9",):
+        raise ValueError("Invalid Seedance Spicy aspect ratio.")
+    if resolution not in (*RESOLUTIONS, "4k"):
+        raise ValueError("Invalid Seedance Spicy resolution.")
+    try:
+        duration = int(duration)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Seedance Spicy duration must be an integer from 4 to 15 seconds.") from exc
+    if not 4 <= duration <= 15:
+        raise ValueError("Seedance Spicy duration must be 4 to 15 seconds.")
+
+    payload: dict[str, Any] = {
+        "image": image,
+        "resolution": resolution,
+        "duration": duration,
+        "generate_audio": bool(generate_audio),
+        "safety_checker": bool(safety_checker),
+    }
+    if prompt.strip():
+        payload["prompt"] = prompt.strip()
+    if last_image:
+        payload["last_image"] = last_image
+    if aspect_ratio:
+        payload["aspect_ratio"] = aspect_ratio
+    if seed is not None:
+        try:
+            seed = int(seed)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Seedance Spicy seed must be -1 or an integer from 0 to 2147483647.") from exc
+        if seed != -1 and not 0 <= seed <= 2_147_483_647:
+            raise ValueError("Seedance Spicy seed must be -1 or an integer from 0 to 2147483647.")
+        payload["seed"] = seed
     return payload
 
 

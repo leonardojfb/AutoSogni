@@ -10,7 +10,7 @@ MODES = ("text", "first_frame", "first_last_frame", "omni", "edit", "extend")
 
 def _url(value: object, label: str) -> str:
     value = str(value or "").strip()
-    if not value.startswith(("https://", "http://", "asset://")):
+    if not value.startswith(("https://", "http://", "asset://", "data:image/", "data:audio/")):
         raise ValueError(f"{label} must be a public URL or BytePlus asset URL.")
     return value
 

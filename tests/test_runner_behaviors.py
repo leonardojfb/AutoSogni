@@ -127,6 +127,38 @@ def test_job_runner_auto_resumes_waiting_workflow_before_continuing():
     assert repo.statuses[0] == (9, "GENERATING", None)
 
 
+def test_job_runner_does_not_resume_non_retryable_waiting_workflow():
+    class FakeRepo:
+        def set_job_status(self, job_id: int, status: str, last_error: str | None = None) -> None:
+            return None
+
+    class FakeSogni:
+        def __init__(self) -> None:
+            self.resumed = []
+
+        def read_workflow(self, workflow_id: str):
+            return {
+                "workflowId": workflow_id,
+                "status": "waiting_for_user",
+                "events": [{"data": {"errorType": "SAFETY_REJECTED", "retryable": False}}],
+            }
+
+        def resume_workflow(self, workflow_id: str):
+            self.resumed.append(workflow_id)
+
+    sogni = FakeSogni()
+    runner = JobRunner(FakeRepo(), sogni, poll_interval=0, max_polls=2)
+
+    try:
+        runner._wait_for_artifact(9, "wf_rejected")
+    except SogniWorkflowFailure as exc:
+        assert "waiting_for_user" in str(exc)
+    else:
+        raise AssertionError("Expected non-retryable workflow failure")
+
+    assert sogni.resumed == []
+
+
 def test_expired_cached_upload_is_replaced_before_workflow_submission(tmp_path: Path):
     db = Database(tmp_path / "app.db")
     db.initialize()

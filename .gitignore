@@ -4,6 +4,8 @@ data/*.sqlite
 data/*.sqlite3
 data/sogni_api_key.txt
 data/wavespeed_api_key.txt
+data/byteplus_upload.json
+data/byteplus_https_upload_token.txt
 data/wavespeed_history.json
 data/wavespeed_queue.json
 data/wavespeed_campaigns.json
@@ -22,6 +24,7 @@ __pycache__/
 .venv/
 venv/
 env/
+/.worktrees/
 
 # Generated media and local input assets
 talking/

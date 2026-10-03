@@ -20,11 +20,12 @@ class BytePlusQueueItem:
     snapshot: dict = field(default_factory=dict)
     status: str = QueueStatus.PENDING
     task_id: str = ""
+    price: float | None = None
     output_file: str = ""
     last_frame_file: str = ""
     error: str = ""
     created_at: str = field(default_factory=_now)
-    def retry(self): self.status, self.task_id, self.output_file, self.last_frame_file, self.error = QueueStatus.PENDING, "", "", "", ""
+    def retry(self): self.status, self.task_id, self.price, self.output_file, self.last_frame_file, self.error = QueueStatus.PENDING, "", None, "", "", ""
 
 @dataclass
 class BytePlusQueue:

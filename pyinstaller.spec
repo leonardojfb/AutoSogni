@@ -1,11 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_submodules
+
+byteplus_hiddenimports = collect_submodules('tos') + collect_submodules('byteplussdkcore')
+
 a = Analysis(
     ['app/main.py'],
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=byteplus_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -15,12 +15,18 @@ from app.sogni.schemas import ModelDescriptor
 from app.sogni.auth import ApiKeyStore
 from app.sogni.loras import validate_lora_selection
 from app.ui.sogni_loras import SogniLoraDialog
+from app.ui.numeric_inputs import WheelSafeSpinBox
 from app.utils.paths import data_dir
 from app.wavespeed.client import WaveSpeedClient
 from app.byteplus.client import BytePlusClient
 from app.byteplus.history import BytePlusHistoryStore
+from app.byteplus.https_uploads import HTTPSUploader
+from app.byteplus.pricing import estimate_cost
 from app.byteplus.queue import BytePlusCampaign, BytePlusCampaignStore, BytePlusQueueItem, QueueStatus
 from app.ui.byteplus_queue import BytePlusQueueWidget
+from app.ui.byteplus_references import BytePlusReferences
+from app.byteplus.media import prepare_snapshot
+from app.byteplus.uploads import BytePlusUploader
 from app.wavespeed.history import WaveSpeedHistoryStore
 from app.wavespeed.flux_queue import FluxCampaign, FluxCampaignStore, FluxQueue, FluxQueueItem, FluxQueueRunner
 from app.wavespeed.queue import (
@@ -38,17 +44,21 @@ from app.wavespeed.validation import (
     RESOLUTIONS as WAVESPEED_RESOLUTIONS,
     MODEL_ID as WAN_MODEL_ID,
     SEEDANCE_MODEL_ID,
+    SEEDANCE_I2V_SPICY_MODEL_ID,
     FLUX_MODEL_ID,
     FACE_SWAP_MODEL_ID,
     build_reference_video_payload,
     build_seedance_payload,
+    build_seedance_i2v_spicy_payload,
     build_flux_payload,
     build_face_swap_payload,
     validate_local_reference_file,
 )
 
+BYTEPLUS_HTTPS_UPLOAD_URL = "https://autosogni-video-uploader-production.up.railway.app"
+
 try:
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, Signal
     from PySide6.QtGui import QPixmap
     from PySide6.QtWidgets import (
         QAbstractItemView,
@@ -69,7 +79,6 @@ try:
         QPushButton,
         QProgressBar,
         QScrollArea,
-        QSpinBox,
         QTableWidget,
         QTableWidgetItem,
         QTabWidget,
@@ -84,6 +93,7 @@ except ImportError:
 
 
 class MainWindow(QMainWindow):
+    byteplus_finished = Signal(str)
     def __init__(
         self,
         repo: CampaignRepository,
@@ -132,6 +142,7 @@ class MainWindow(QMainWindow):
         self._selected_sogni_loras: list[list] = []
         self._sogni_lora_catalog: list[dict] = []
         self.current_campaign_id: int | None = None
+        self._editable_base_campaign_id: int | None = None
         self._queue_running = False
         self.setWindowTitle("Sogni Video Automator")
         self._build_ui()
@@ -188,14 +199,39 @@ class MainWindow(QMainWindow):
         self.duration_seconds_edit = QLineEdit("8")
         self.aspect_ratio_combo = QComboBox()
         self.aspect_ratio_combo.addItems(ASPECT_RATIOS)
-        self.concurrency_spin = QSpinBox()
+        self.concurrency_spin = WheelSafeSpinBox()
         self.concurrency_spin.setRange(1, 3)
         self.concurrency_spin.setValue(1)
         self.skip_prompt_processing_check = QCheckBox("Preserve exact H3 prompt (disable Sogni processing)")
         self.skip_prompt_processing_check.setChecked(True)
 
         form.addRow("Name", self.name_edit)
-        form.addRow("Frames folder", self._path_picker(self.frames_edit, True))
+        self.frames_label = QLabel("Frames folder")
+        self.frames_picker = self._path_picker(self.frames_edit, True)
+        form.addRow(self.frames_label, self.frames_picker)
+        self.sogni_reference_list = QListWidget()
+        self.sogni_reference_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        reference_controls = QWidget()
+        reference_layout = QVBoxLayout(reference_controls)
+        reference_layout.setContentsMargins(0, 0, 0, 0)
+        reference_buttons = QHBoxLayout()
+        self.sogni_reference_add_button = QPushButton("Agregar fotos/videos")
+        self.sogni_reference_add_button.clicked.connect(self._add_sogni_references)
+        remove_references = QPushButton("Quitar")
+        remove_references.clicked.connect(self._remove_sogni_references)
+        up_reference = QPushButton("↑")
+        up_reference.clicked.connect(lambda: self._move_sogni_reference(-1))
+        down_reference = QPushButton("↓")
+        down_reference.clicked.connect(lambda: self._move_sogni_reference(1))
+        for button in (self.sogni_reference_add_button, remove_references, up_reference, down_reference):
+            reference_buttons.addWidget(button)
+        reference_layout.addLayout(reference_buttons)
+        reference_layout.addWidget(self.sogni_reference_list)
+        self.sogni_reference_label = QLabel("Referencias seleccionadas")
+        form.addRow(self.sogni_reference_label, reference_controls)
+        self.sogni_reference_label.hide()
+        reference_controls.hide()
+        self.sogni_reference_controls = reference_controls
         form.addRow("Prompts file", self._path_picker(self.prompts_edit, False))
         form.addRow("Output folder", self._path_picker(self.output_edit, True))
         form.addRow("Model", self.model_combo)
@@ -220,12 +256,21 @@ class MainWindow(QMainWindow):
         fetch_models.clicked.connect(self._fetch_models)
         create = QPushButton("Create Campaign")
         create.clicked.connect(self._create_campaign)
-        self.start_button = QPushButton("Start / Resume")
+        self.use_campaign_as_base_button = QPushButton("Usar como base")
+        self.use_campaign_as_base_button.clicked.connect(self._use_campaign_as_base)
+        self.campaign_queue_add_button = QPushButton("Agregar jobs a campaña seleccionada")
+        self.campaign_queue_add_button.setToolTip(
+            "Agrega los frames y prompts indicados a la campaña seleccionada; no crea otra campaña."
+        )
+        self.campaign_queue_add_button.clicked.connect(self._add_jobs_to_selected_campaign)
+        self.start_button = QPushButton("Iniciar cola / Reanudar")
         self.start_button.clicked.connect(self._start_campaign)
         pause = QPushButton("Soft Pause")
         pause.clicked.connect(self._pause_campaign)
         buttons.addWidget(fetch_models)
         buttons.addWidget(create)
+        buttons.addWidget(self.use_campaign_as_base_button)
+        buttons.addWidget(self.campaign_queue_add_button)
         buttons.addWidget(self.start_button)
         buttons.addWidget(pause)
         layout.addLayout(buttons)
@@ -234,13 +279,23 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.progress)
         self.summary_label = QLabel("No campaign selected.")
         layout.addWidget(self.summary_label)
+
+        queue_group = QGroupBox("Cola Sogni")
+        queue_layout = QVBoxLayout(queue_group)
+        self.sogni_queue_table = QTableWidget(0, 7)
+        self.sogni_queue_table.setHorizontalHeaderLabels(
+            ["#", "Frame", "Prompt", "Modelo", "Estado", "Intentos", "Acción"]
+        )
+        self.sogni_queue_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        queue_layout.addWidget(self.sogni_queue_table)
+        layout.addWidget(queue_group)
         return page
 
     def _frames_tab(self) -> QWidget:
         page = QWidget()
         layout = QHBoxLayout(page)
-        self.frames_table = QTableWidget(0, 3)
-        self.frames_table.setHorizontalHeaderLabels(["#", "Frame", "Outfit Name"])
+        self.frames_table = QTableWidget(0, 4)
+        self.frames_table.setHorizontalHeaderLabels(["#", "Frame", "Outfit Name", "Posición"])
         self.frames_table.itemChanged.connect(self._frame_changed)
         self.frames_table.itemSelectionChanged.connect(self._frame_selected)
         layout.addWidget(self.frames_table, 2)
@@ -262,8 +317,8 @@ class MainWindow(QMainWindow):
     def _prompts_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        self.prompts_table = QTableWidget(0, 3)
-        self.prompts_table.setHorizontalHeaderLabels(["ID", "Prompt Name", "Prompt Text"])
+        self.prompts_table = QTableWidget(0, 4)
+        self.prompts_table.setHorizontalHeaderLabels(["ID", "Prompt Name", "Prompt Text", "Posición"])
         self.prompts_table.itemChanged.connect(self._prompt_changed)
         layout.addWidget(self.prompts_table)
         return page
@@ -271,8 +326,8 @@ class MainWindow(QMainWindow):
     def _jobs_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        self.jobs_table = QTableWidget(0, 7)
-        self.jobs_table.setHorizontalHeaderLabels(["#", "Outfit", "Prompt", "Model", "Status", "Attempts", "Action"])
+        self.jobs_table = QTableWidget(0, 8)
+        self.jobs_table.setHorizontalHeaderLabels(["#", "Outfit", "Prompt", "Model", "Status", "Attempts", "Action", "Posición"])
         self.jobs_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(self.jobs_table)
         return page
@@ -304,6 +359,7 @@ class MainWindow(QMainWindow):
         self.wavespeed_model_combo = QComboBox()
         self.wavespeed_model_combo.addItem("WAN 3.0 Reference-to-Video", WAN_MODEL_ID)
         self.wavespeed_model_combo.addItem("Seedance 2.0 Text-to-Video", SEEDANCE_MODEL_ID)
+        self.wavespeed_model_combo.addItem("Seedance 2.0 Image-to-Video Spicy", SEEDANCE_I2V_SPICY_MODEL_ID)
         self.wavespeed_model_combo.currentIndexChanged.connect(self._wavespeed_model_changed)
         connection_form.addWidget(QLabel("Modelo"), 2, 0)
         connection_form.addWidget(self.wavespeed_model_combo, 2, 1, 1, 2)
@@ -326,6 +382,7 @@ class MainWindow(QMainWindow):
         references_layout = QGridLayout(references)
         self.wavespeed_reference_lists: dict[str, QListWidget] = {}
         self.wavespeed_reference_labels: dict[str, QLabel] = {}
+        self.wavespeed_reference_boxes: dict[str, QWidget] = {}
         reference_specs = (
             ("reference_images", "Imágenes (0/10)", "Images (*.png *.jpg *.jpeg *.webp *.gif)"),
             ("reference_videos", "Videos (0/5)", "Videos (*.mp4 *.mov)"),
@@ -339,6 +396,7 @@ class MainWindow(QMainWindow):
             list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
             list_widget.setMinimumHeight(95)
             self.wavespeed_reference_lists[kind] = list_widget
+            self.wavespeed_reference_boxes[kind] = box
             count_label = QLabel(label)
             self.wavespeed_reference_labels[kind] = count_label
             box_layout.addWidget(count_label)
@@ -357,20 +415,25 @@ class MainWindow(QMainWindow):
         parameters = QGroupBox("Parámetros del modelo")
         parameters_form = QGridLayout(parameters)
         self.wavespeed_resolution_combo = QComboBox()
-        self.wavespeed_resolution_combo.addItems(list(WAVESPEED_RESOLUTIONS))
+        self.wavespeed_resolution_combo.addItems([*WAVESPEED_RESOLUTIONS, "4k"])
         self.wavespeed_resolution_combo.setCurrentText("720p")
         self.wavespeed_aspect_combo = QComboBox()
-        self.wavespeed_aspect_combo.addItems(list(WAVESPEED_ASPECT_RATIOS))
+        self.wavespeed_aspect_combo.addItems([*WAVESPEED_ASPECT_RATIOS, "21:9"])
         self.wavespeed_aspect_combo.setCurrentText("16:9")
-        self.wavespeed_duration_spin = QSpinBox()
+        self.wavespeed_duration_spin = WheelSafeSpinBox()
         self.wavespeed_duration_spin.setRange(2, 30)
         self.wavespeed_duration_spin.setValue(5)
         self.wavespeed_prompt_expansion_check = QCheckBox("enable_prompt_expansion")
         self.wavespeed_audio_check = QCheckBox("enable_audio")
         self.wavespeed_audio_check.setChecked(True)
+        self.wavespeed_safety_checker_check = QCheckBox("Safety checker")
+        self.wavespeed_safety_checker_check.setChecked(True)
+        self.wavespeed_safety_checker_check.setToolTip(
+            "Activado aplica el filtro de WaveSpeed; desactivado envía safety_checker=false al API."
+        )
         self.wavespeed_random_seed_check = QCheckBox("Seed aleatorio (-1)")
         self.wavespeed_random_seed_check.setChecked(True)
-        self.wavespeed_seed_spin = QSpinBox()
+        self.wavespeed_seed_spin = WheelSafeSpinBox()
         self.wavespeed_seed_spin.setRange(0, 2_147_483_647)
         self.wavespeed_seed_spin.setEnabled(False)
         self.wavespeed_random_seed_check.toggled.connect(self.wavespeed_seed_spin.setDisabled)
@@ -384,6 +447,7 @@ class MainWindow(QMainWindow):
         parameters_form.addWidget(self.wavespeed_audio_check, 1, 3)
         parameters_form.addWidget(self.wavespeed_random_seed_check, 2, 0, 1, 2)
         parameters_form.addWidget(self.wavespeed_seed_spin, 2, 2)
+        parameters_form.addWidget(self.wavespeed_safety_checker_check, 3, 0, 1, 2)
         layout.addWidget(parameters)
 
         advanced = QGroupBox("Opciones API avanzadas")
@@ -483,30 +547,231 @@ class MainWindow(QMainWindow):
         return page
 
     def _wavespeed_model_changed(self) -> None:
-        seedance = self.wavespeed_model_combo.currentData() == SEEDANCE_MODEL_ID
-        model_id = SEEDANCE_MODEL_ID if seedance else WAN_MODEL_ID
+        model_id = self.wavespeed_model_combo.currentData()
+        seedance = model_id == SEEDANCE_MODEL_ID
+        spicy_i2v = model_id == SEEDANCE_I2V_SPICY_MODEL_ID
+        seedance_family = seedance or spicy_i2v
         self.wavespeed_endpoint_label.setText(f"Modelo: {model_id}\nEndpoint: {self.wavespeed.BASE_URL}/{model_id}")
         resolution = self.wavespeed_resolution_combo.currentText()
         aspect = self.wavespeed_aspect_combo.currentText()
         self.wavespeed_resolution_combo.clear()
-        self.wavespeed_resolution_combo.addItems([*WAVESPEED_RESOLUTIONS, *(["4k"] if seedance else [])])
+        self.wavespeed_resolution_combo.addItems([*WAVESPEED_RESOLUTIONS, *( ["4k"] if seedance_family else [])])
         self.wavespeed_resolution_combo.setCurrentText(resolution if self.wavespeed_resolution_combo.findText(resolution) >= 0 else "720p")
         self.wavespeed_aspect_combo.clear()
-        self.wavespeed_aspect_combo.addItems([*WAVESPEED_ASPECT_RATIOS, *(["21:9"] if seedance else [])])
+        if spicy_i2v:
+            self.wavespeed_aspect_combo.addItem("Automático (según imagen)")
+        self.wavespeed_aspect_combo.addItems([*WAVESPEED_ASPECT_RATIOS, *( ["21:9"] if seedance_family else [])])
         self.wavespeed_aspect_combo.setCurrentText(aspect if self.wavespeed_aspect_combo.findText(aspect) >= 0 else "16:9")
-        self.wavespeed_duration_spin.setRange(4 if seedance else 2, 15 if seedance else 30)
-        for kind, title, limit in (("reference_images", "Imágenes", 9 if seedance else 10),
-                                   ("reference_videos", "Videos", 3 if seedance else 5),
-                                   ("reference_audios", "Audios", 3 if seedance else 5)):
+        self.wavespeed_duration_spin.setRange(4 if seedance_family else 2, 15 if seedance_family else 30)
+        limits = ({"reference_images": 2, "reference_videos": 0, "reference_audios": 0} if spicy_i2v else
+                  {"reference_images": 9, "reference_videos": 3, "reference_audios": 3} if seedance else
+                  {"reference_images": 10, "reference_videos": 5, "reference_audios": 5})
+        titles = {"reference_images": "Frames inicio/final" if spicy_i2v else "Imágenes",
+                  "reference_videos": "Videos", "reference_audios": "Audios"}
+        for kind, title in titles.items():
+            limit = limits[kind]
+            self.wavespeed_reference_boxes[kind].setVisible(limit > 0)
             self.wavespeed_reference_labels[kind].setText(
                 f"{title} ({self.wavespeed_reference_lists[kind].count()}/{limit})")
+        self.wavespeed_reference_lists["reference_images"].setToolTip(
+            "Primera imagen: image (inicio). Segunda imagen opcional: last_image (frame final)."
+            if spicy_i2v else "Referencias de imagen para el modelo seleccionado."
+        )
+        self.wavespeed_prompt_expansion_check.setVisible(not spicy_i2v)
         self.wavespeed_prompt_expansion_check.setText("enable_web_search" if seedance else "enable_prompt_expansion")
-        self.wavespeed_audio_check.setText("generate_audio" if seedance else "enable_audio")
-        self.wavespeed_random_seed_check.setVisible(not seedance)
-        self.wavespeed_seed_spin.setVisible(not seedance)
-        self.wavespeed_sync_check.setVisible(not seedance)
-        self.wavespeed_base64_check.setVisible(not seedance)
-        self.wavespeed_status_label.setText("Listo. Seedance acepta solo texto o referencias." if seedance else "Listo. Agregá al menos una referencia.")
+        self.wavespeed_audio_check.setText("generate_audio" if seedance_family else "enable_audio")
+        self.wavespeed_safety_checker_check.setVisible(seedance_family)
+        self.wavespeed_random_seed_check.setVisible(not seedance or spicy_i2v)
+        self.wavespeed_seed_spin.setVisible(not seedance or spicy_i2v)
+        self.wavespeed_sync_check.setVisible(not seedance_family)
+        self.wavespeed_base64_check.setVisible(not seedance_family)
+        self.wavespeed_queue_add_button.setEnabled(not spicy_i2v)
+        self.wavespeed_queue_add_button.setToolTip(
+            "La cola actual requiere un frame compartido y un video por fila."
+            if spicy_i2v else "Agregar la configuración actual a la cola."
+        )
+        self.wavespeed_prompt_edit.setPlaceholderText(
+            "Describe el movimiento, la cámara y el resultado esperado."
+            if spicy_i2v else
+            "Describe la escena, movimiento, cámara, iluminación y cómo debe usarse cada referencia."
+        )
+        self.wavespeed_status_label.setText(
+            "Spicy I2V: imagen inicial obligatoria; segunda imagen opcional como frame final."
+            if spicy_i2v else
+            "Listo. Seedance acepta solo texto o referencias."
+            if seedance else "Listo. Agregá al menos una referencia."
+        )
+
+    def _byteplus_tab(self) -> QWidget:
+        page = QWidget(); layout = QVBoxLayout(page)
+        self.byteplus_api_key_edit = QLineEdit(self.byteplus_key_store.get()); self.byteplus_api_key_edit.setEchoMode(QLineEdit.Password)
+        save = QPushButton("Guardar clave BytePlus"); save.clicked.connect(self._byteplus_save_key)
+        test = QPushButton("Probar API"); test.clicked.connect(self._byteplus_test_connection)
+        layout.addWidget(QLabel("BytePlus ModelArk · dreamina-seedance-2-0-260128")); layout.addWidget(self.byteplus_api_key_edit); layout.addWidget(save); layout.addWidget(test)
+        self.byteplus_mode_combo = QComboBox(); self.byteplus_mode_combo.addItems(["Texto a video", "Imagen primer frame", "Imagen primer y último frame", "Referencias omni", "Editar video", "Extender video"])
+        self.byteplus_prompt_edit = QTextEdit(); self.byteplus_prompt_edit.setPlaceholderText("Prompt Seedance 2.0")
+        self.byteplus_references = BytePlusReferences()
+        self.byteplus_mode_combo.currentIndexChanged.connect(self.byteplus_references.set_mode)
+        self.byteplus_resolution_combo = QComboBox(); self.byteplus_resolution_combo.addItems(["480p", "720p", "1080p", "4k"])
+        self.byteplus_ratio_combo = QComboBox(); self.byteplus_ratio_combo.addItems(["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]); self.byteplus_ratio_combo.setCurrentText("16:9")
+        self.byteplus_duration_spin = WheelSafeSpinBox(); self.byteplus_duration_spin.setRange(4, 15); self.byteplus_duration_spin.setValue(5)
+        self.byteplus_input_duration_spin = WheelSafeSpinBox(); self.byteplus_input_duration_spin.setRange(0, 120); self.byteplus_input_duration_spin.setValue(0)
+        self.byteplus_audio_check = QCheckBox("Generar audio"); self.byteplus_audio_check.setChecked(True); self.byteplus_watermark_check = QCheckBox("Watermark"); self.byteplus_last_frame_check = QCheckBox("Devolver último frame")
+        for widget in (self.byteplus_mode_combo, self.byteplus_prompt_edit, self.byteplus_references, self.byteplus_resolution_combo, self.byteplus_ratio_combo, self.byteplus_duration_spin, self.byteplus_input_duration_spin, self.byteplus_audio_check, self.byteplus_watermark_check, self.byteplus_last_frame_check): layout.addWidget(widget)
+        output_row = QHBoxLayout()
+        self.byteplus_output_edit = QLineEdit(str(data_dir() / "byteplus_outputs"))
+        choose_output = QPushButton("Carpeta de salida")
+        choose_output.clicked.connect(self._byteplus_choose_output)
+        output_row.addWidget(QLabel("Guardar videos en")); output_row.addWidget(self.byteplus_output_edit); output_row.addWidget(choose_output)
+        layout.addLayout(output_row)
+        upload_box = QGroupBox("Carga de referencias (TOS o HTTPS)")
+        upload_box.setCheckable(True); upload_box.setChecked(True)
+        upload_form = QFormLayout(upload_box)
+        self.byteplus_upload_fields = {}
+        settings_path = self.byteplus_key_store.path.parent / "byteplus_upload.json"
+        self._byteplus_upload_path = settings_path
+        self._byteplus_upload_token_path = settings_path.parent / "byteplus_https_upload_token.txt"
+        try:
+            upload_settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+        except (ValueError, OSError):
+            upload_settings = {}
+        if not upload_settings.get("https_token") and self._byteplus_upload_token_path.exists():
+            try:
+                upload_settings["https_token"] = self._byteplus_upload_token_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                upload_settings["https_token"] = ""
+        self.byteplus_upload_provider_combo = QComboBox()
+        self.byteplus_upload_provider_combo.addItem("BytePlus TOS", "tos")
+        self.byteplus_upload_provider_combo.addItem("Servidor HTTPS", "https")
+        provider_index = self.byteplus_upload_provider_combo.findData(upload_settings.get("provider") or "https")
+        self.byteplus_upload_provider_combo.setCurrentIndex(max(provider_index, 0))
+        upload_form.addRow("Proveedor de carga", self.byteplus_upload_provider_combo)
+        for key, title, default in (("access_key", "Access Key (AK)", ""), ("secret_key", "Secret Key (SK)", ""),
+                                    ("bucket", "Bucket TOS", ""), ("endpoint", "Endpoint TOS", "https://tos-ap-southeast-1.bytepluses.com"),
+                                    ("region", "Región TOS", "ap-southeast-1"), ("project", "Proyecto de assets", "default"),
+                                    ("https_url", "URL base del servicio HTTPS", BYTEPLUS_HTTPS_UPLOAD_URL),
+                                    ("https_token", "Token del servicio HTTPS", "")):
+            edit = QLineEdit(upload_settings.get(key, default))
+            if key in ("access_key", "secret_key", "https_token"): edit.setEchoMode(QLineEdit.Password)
+            self.byteplus_upload_fields[key] = edit
+            upload_form.addRow(title, edit)
+        upload_save = QPushButton("Guardar configuración de carga")
+        upload_save.clicked.connect(self._byteplus_save_upload)
+        upload_form.addRow(upload_save)
+        layout.addWidget(upload_box)
+        self.byteplus_asset_group_edit = QLineEdit()
+        self.byteplus_asset_group_edit.setPlaceholderText("Group ID de biblioteca verificada (opcional; convierte archivos locales en assets)")
+        layout.addWidget(self.byteplus_asset_group_edit)
+        self.byteplus.uploader = self._byteplus_build_uploader(upload_settings)
+        self.byteplus_input_duration_spin.setToolTip("Duración del video de entrada; úsalo para una estimación más precisa en Editar/Extender.")
+        self.byteplus_status_label = QLabel("Listo.")
+        self.byteplus_status_label.setWordWrap(True)
+        self.byteplus_status_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        generate = QPushButton("Generar video"); generate.clicked.connect(self._byteplus_generate); add = QPushButton("Agregar a la cola"); add.clicked.connect(self._byteplus_add_queue); layout.addWidget(generate); layout.addWidget(add)
+        self.byteplus_generate_button = generate
+        self.byteplus_finished.connect(self._byteplus_submission_finished)
+        estimate = QPushButton("Estimar precio"); estimate.clicked.connect(self._byteplus_estimate_price)
+        self.byteplus_price_label = QLabel("Precio: no estimado")
+        queue_estimate = QPushButton("Estimar costos cola"); queue_estimate.clicked.connect(self._byteplus_estimate_queue_prices)
+        self.byteplus_queue_total_label = QLabel("Total cola: no estimado")
+        layout.addWidget(estimate); layout.addWidget(self.byteplus_price_label); layout.addWidget(queue_estimate); layout.addWidget(self.byteplus_queue_total_label); layout.addWidget(self.byteplus_status_label)
+        self.byteplus_queue_widget = BytePlusQueueWidget(); self.byteplus_queue_widget.start_requested.connect(self._byteplus_run_queue); self.byteplus_queue_widget.estimate_requested.connect(self._byteplus_estimate_queue_prices); layout.addWidget(self.byteplus_queue_widget); self._load_byteplus_campaign()
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(page)
+        return scroll
+
+    def _byteplus_snapshot(self):
+        mode = ("text", "first_frame", "first_last_frame", "omni", "edit", "extend")[self.byteplus_mode_combo.currentIndex()]
+        value = {"mode": mode, "prompt": self.byteplus_prompt_edit.toPlainText(), "resolution": self.byteplus_resolution_combo.currentText(), "ratio": self.byteplus_ratio_combo.currentText(), "duration": self.byteplus_duration_spin.value(), "input_video_duration": self.byteplus_input_duration_spin.value(), "generate_audio": self.byteplus_audio_check.isChecked(), "watermark": self.byteplus_watermark_check.isChecked(), "return_last_frame": self.byteplus_last_frame_check.isChecked()}
+        value.update(self.byteplus_references.snapshot(self.byteplus_mode_combo.currentIndex()))
+        value["asset_group_id"] = self.byteplus_asset_group_edit.text().strip()
+        return value
+
+    def _byteplus_save_upload(self):
+        settings = {key: edit.text().strip() for key, edit in self.byteplus_upload_fields.items()}
+        settings["provider"] = self.byteplus_upload_provider_combo.currentData()
+        self._byteplus_upload_path.parent.mkdir(parents=True, exist_ok=True)
+        token = settings.pop("https_token", "")
+        if token:
+            self._byteplus_upload_token_path.write_text(token, encoding="utf-8")
+        self._byteplus_upload_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        settings["https_token"] = token
+        self.byteplus.uploader = self._byteplus_build_uploader(settings)
+        self.byteplus_status_label.setText("Configuración de carga guardada.")
+
+    @staticmethod
+    def _byteplus_build_uploader(settings):
+        if (settings.get("provider") or "https") == "https":
+            return HTTPSUploader(
+                settings.get("https_url") or BYTEPLUS_HTTPS_UPLOAD_URL,
+                settings.get("https_token", ""),
+                asset_uploader=BytePlusUploader(settings),
+            )
+        return BytePlusUploader(settings)
+
+    def _byteplus_save_key(self): self.byteplus_key_store.save(self.byteplus_api_key_edit.text()); self.byteplus.api_key = self.byteplus_api_key_edit.text().strip(); self.byteplus_status_label.setText("Clave guardada.")
+    def _byteplus_choose_output(self):
+        selected = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta de salida")
+        if selected: self.byteplus_output_edit.setText(selected)
+    def _byteplus_test_connection(self):
+        try:
+            self._byteplus_save_key(); self.byteplus.test_connection(); self.byteplus_status_label.setText("API BytePlus conectada.")
+        except Exception as exc:
+            self.byteplus_status_label.setText(f"Error de conexión: {exc}")
+    def _load_byteplus_campaign(self):
+        campaigns, active = self.byteplus_campaign_store.load(); campaign = next((x for x in campaigns if x.campaign_id == active), None) or (campaigns[0] if campaigns else BytePlusCampaign()); self._byteplus_campaign_id = campaign.campaign_id; self.byteplus_campaign_store.save(campaign, active=True); self.byteplus_queue_widget.load_queue(campaign.queue)
+    def _save_byteplus_queue(self): self.byteplus_campaign_store.save(BytePlusCampaign(self._byteplus_campaign_id, "Nueva campaña BytePlus", self.byteplus_queue_widget.queue()), active=True)
+    def _byteplus_add_queue(self):
+        try:
+            from app.byteplus.validation import build_task_payload
+            snapshot = self._byteplus_snapshot(); build_task_payload(prepare_snapshot(snapshot, validate_only=True)); item = BytePlusQueueItem(snapshot=snapshot); self.byteplus_queue_widget.queue().items.append(item); self.byteplus_queue_widget.add_item(item); self._save_byteplus_queue(); self.byteplus_status_label.setText("Agregado a la cola.")
+        except Exception as exc: self.byteplus_status_label.setText(f"Error: {exc}")
+    def _byteplus_generate(self):
+        try:
+            snapshot = self._byteplus_snapshot()
+            self.byteplus.api_key = self.byteplus_api_key_edit.text().strip()
+        except Exception as exc:
+            self.byteplus_status_label.setText(f"Error: {exc}"); return
+        self.byteplus_generate_button.setEnabled(False)
+        output_dir = Path(self.byteplus_output_edit.text().strip() or data_dir() / "byteplus_outputs")
+        self.byteplus_status_label.setText("Generando en BytePlus; se descargará al terminar…")
+        def run():
+            try:
+                destination = self.byteplus.generate_and_download(snapshot, output_dir)
+                message = f"Video descargado: {destination}"
+            except Exception as exc:
+                message = f"Error: {exc}"
+            self.byteplus_finished.emit(message)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _byteplus_submission_finished(self, message):
+        self.byteplus_status_label.setText(message)
+        self.byteplus_generate_button.setEnabled(True)
+
+    def _byteplus_estimate_price(self):
+        try:
+            amount = estimate_cost(self._byteplus_snapshot())
+            self.byteplus_price_label.setText(f"Precio estimado: ${amount:.4f} USD")
+            self.byteplus_status_label.setText("Estimación aproximada; el cobro real depende del consumo facturado.")
+        except Exception as exc:
+            self.byteplus_price_label.setText(f"Precio: error: {exc}")
+
+    def _byteplus_estimate_queue_prices(self):
+        try:
+            total = 0.0
+            queue = self.byteplus_queue_widget.queue()
+            for item in queue.items:
+                item.price = estimate_cost(item.snapshot)
+                total += item.price
+                self.byteplus_queue_widget.set_item_price(item.item_id, item.price)
+            self.byteplus_queue_total_label.setText(f"Total cola: ${total:.4f} USD")
+            self.byteplus_queue_widget.set_total_price(total)
+            self._save_byteplus_queue()
+            self.byteplus_status_label.setText("Costos estimados.")
+        except Exception as exc:
+            self.byteplus_queue_total_label.setText(f"Total cola: error: {exc}")
+            self.byteplus_queue_widget.set_total_price(None, str(exc))
+            self.byteplus_status_label.setText(f"Error al estimar costos: {exc}")
+    def _byteplus_run_queue(self): self.byteplus_status_label.setText("Cola lista: iniciá cada tarea desde la solicitud guardada.")
 
     def _byteplus_tab(self) -> QWidget:
         self.byteplus_tab = QWidget(); layout = QVBoxLayout(self.byteplus_tab)
@@ -520,7 +785,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.byteplus_mode_combo); layout.addWidget(self.byteplus_prompt_edit); layout.addWidget(self.byteplus_urls_edit)
         self.byteplus_resolution_combo = QComboBox(); self.byteplus_resolution_combo.addItems(["480p", "720p", "1080p", "4k"])
         self.byteplus_ratio_combo = QComboBox(); self.byteplus_ratio_combo.addItems(["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]); self.byteplus_ratio_combo.setCurrentText("16:9")
-        self.byteplus_duration_spin = QSpinBox(); self.byteplus_duration_spin.setRange(4, 15); self.byteplus_duration_spin.setValue(5)
+        self.byteplus_duration_spin = WheelSafeSpinBox(); self.byteplus_duration_spin.setRange(4, 15); self.byteplus_duration_spin.setValue(5)
         self.byteplus_audio_check = QCheckBox("Generar audio"); self.byteplus_audio_check.setChecked(True); self.byteplus_watermark_check = QCheckBox("Watermark"); self.byteplus_last_frame_check = QCheckBox("Devolver último frame")
         controls = QHBoxLayout(); [controls.addWidget(widget) for widget in (self.byteplus_resolution_combo, self.byteplus_ratio_combo, self.byteplus_duration_spin, self.byteplus_audio_check, self.byteplus_watermark_check, self.byteplus_last_frame_check)]; layout.addLayout(controls)
         self.byteplus_status_label = QLabel("Listo."); generate = QPushButton("Generar video"); generate.clicked.connect(self._byteplus_generate); add = QPushButton("Agregar a la cola"); add.clicked.connect(self._byteplus_add_queue); layout.addWidget(generate); layout.addWidget(add); layout.addWidget(self.byteplus_status_label)
@@ -598,7 +863,7 @@ class MainWindow(QMainWindow):
         identity_row.addWidget(identity_button)
         layout.addLayout(identity_row)
         options = QGridLayout()
-        self.face_swap_target_index = QSpinBox()
+        self.face_swap_target_index = WheelSafeSpinBox()
         self.face_swap_target_index.setRange(0, 10)
         self.face_swap_gender_combo = QComboBox()
         self.face_swap_gender_combo.addItem("Mujer", "female")
@@ -665,7 +930,7 @@ class MainWindow(QMainWindow):
         self.flux_size_edit.setPlaceholderText("Vacío = tamaño de entrada; ej. 1024*1024")
         self.flux_random_seed_check = QCheckBox("Seed aleatorio (-1)")
         self.flux_random_seed_check.setChecked(True)
-        self.flux_seed_spin = QSpinBox()
+        self.flux_seed_spin = WheelSafeSpinBox()
         self.flux_seed_spin.setRange(0, 2_147_483_647)
         self.flux_seed_spin.setDisabled(True)
         self.flux_random_seed_check.toggled.connect(self.flux_seed_spin.setDisabled)
@@ -740,10 +1005,38 @@ class MainWindow(QMainWindow):
             item.setToolTip(path)
             self.flux_images.addItem(item)
             existing.add(path)
+        self._refresh_reference_positions(self.flux_images)
 
     def _flux_remove_images(self) -> None:
         for item in self.flux_images.selectedItems():
             self.flux_images.takeItem(self.flux_images.row(item))
+        self._refresh_reference_positions(self.flux_images)
+
+    def _flux_move_image(self, direction: int) -> None:
+        source = self.flux_images.currentRow()
+        destination = source + direction
+        if source < 0 or not 0 <= destination < self.flux_images.count():
+            return
+        item = self.flux_images.takeItem(source)
+        self.flux_images.insertItem(destination, item)
+        self.flux_images.setCurrentRow(destination)
+        self._refresh_reference_positions(self.flux_images)
+
+    @staticmethod
+    def _refresh_reference_positions(widget: QListWidget) -> None:
+        for index in range(widget.count()):
+            item = widget.item(index)
+            row = QWidget()
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(4, 0, 4, 0)
+            filename = QLabel(item.text())
+            filename.setToolTip(item.toolTip())
+            badge = QLabel(f"#{index + 1}")
+            badge.setObjectName("positionBadge")
+            badge.setStyleSheet("color: #8f9aa7; font-size: 10px;")
+            layout.addWidget(filename, 1)
+            layout.addWidget(badge)
+            widget.setItemWidget(item, row)
 
     def _flux_move_image(self, direction: int) -> None:
         source = self.flux_images.currentRow()
@@ -1117,8 +1410,11 @@ class MainWindow(QMainWindow):
 
     def _wavespeed_add_files(self, kind: str, file_filter: str) -> None:
         selected, _ = QFileDialog.getOpenFileNames(self, "Seleccionar referencias", filter=file_filter)
-        limits = ({"reference_images": 9, "reference_videos": 3, "reference_audios": 3}
-                  if self.wavespeed_model_combo.currentData() == SEEDANCE_MODEL_ID else
+        model_id = self.wavespeed_model_combo.currentData()
+        limits = ({"reference_images": 2, "reference_videos": 0, "reference_audios": 0}
+                  if model_id == SEEDANCE_I2V_SPICY_MODEL_ID else
+                  {"reference_images": 9, "reference_videos": 3, "reference_audios": 3}
+                  if model_id == SEEDANCE_MODEL_ID else
                   {"reference_images": 10, "reference_videos": 5, "reference_audios": 5})
         widget = self.wavespeed_reference_lists[kind]
         existing = {widget.item(index).data(Qt.UserRole) for index in range(widget.count())}
@@ -1131,6 +1427,7 @@ class MainWindow(QMainWindow):
             item.setToolTip(path)
             widget.addItem(item)
             existing.add(path)
+        self._refresh_reference_positions(widget)
         self.wavespeed_status_label.setText(f"{widget.count()}/{limits[kind]} referencias en {kind}.")
         title = {"reference_images": "Imágenes", "reference_videos": "Videos", "reference_audios": "Audios"}[kind]
         self.wavespeed_reference_labels[kind].setText(f"{title} ({widget.count()}/{limits[kind]})")
@@ -1192,6 +1489,7 @@ class MainWindow(QMainWindow):
         widget = self.wavespeed_reference_lists[kind]
         for item in widget.selectedItems():
             widget.takeItem(widget.row(item))
+        self._refresh_reference_positions(widget)
         self._wavespeed_model_changed()
 
     def _wavespeed_choose_output(self) -> None:
@@ -1225,10 +1523,13 @@ class MainWindow(QMainWindow):
             "reference_videos": paths("reference_videos"),
             "reference_audios": paths("reference_audios"),
             "resolution": self.wavespeed_resolution_combo.currentText(),
-            "aspect_ratio": self.wavespeed_aspect_combo.currentText(),
+            "aspect_ratio": "" if self.wavespeed_model_combo.currentData() == SEEDANCE_I2V_SPICY_MODEL_ID
+                            and self.wavespeed_aspect_combo.currentText() == "Automático (según imagen)"
+                            else self.wavespeed_aspect_combo.currentText(),
             "duration": self.wavespeed_duration_spin.value(),
             "enable_prompt_expansion": self.wavespeed_prompt_expansion_check.isChecked(),
             "enable_audio": self.wavespeed_audio_check.isChecked(),
+            "safety_checker": self.wavespeed_safety_checker_check.isChecked(),
             "seed": -1 if self.wavespeed_random_seed_check.isChecked() else self.wavespeed_seed_spin.value(),
             "enable_sync_mode": self.wavespeed_sync_check.isChecked(),
             "enable_base64_output": self.wavespeed_base64_check.isChecked(),
@@ -1237,14 +1538,21 @@ class MainWindow(QMainWindow):
         }
 
     def _wavespeed_upload_and_build(self, snapshot: dict) -> tuple[dict, dict[str, dict]]:
-        if snapshot["model_id"] == SEEDANCE_MODEL_ID:
+        model_id = snapshot["model_id"]
+        if model_id == SEEDANCE_MODEL_ID:
             build_seedance_payload(prompt=snapshot["prompt"],
                 reference_images=snapshot["reference_images"], reference_videos=snapshot["reference_videos"],
                 reference_audios=snapshot["reference_audios"], resolution=snapshot["resolution"],
                 aspect_ratio=snapshot["aspect_ratio"], duration=snapshot["duration"],
                 enable_web_search=snapshot["enable_prompt_expansion"], generate_audio=snapshot["enable_audio"])
+        elif model_id == SEEDANCE_I2V_SPICY_MODEL_ID:
+            image_count = len(snapshot["reference_images"])
+            if not 1 <= image_count <= 2:
+                raise ValueError("Seedance Spicy requiere una imagen inicial y admite una segunda imagen final opcional.")
         uploaded: dict[str, dict] = {}
-        for kind in ("reference_images", "reference_videos", "reference_audios"):
+        media_kinds = (("reference_images",) if model_id == SEEDANCE_I2V_SPICY_MODEL_ID
+                       else ("reference_images", "reference_videos", "reference_audios"))
+        for kind in media_kinds:
             urls = []
             for file_name in snapshot[kind]:
                 cache_key = str(Path(file_name).resolve())
@@ -1263,9 +1571,19 @@ class MainWindow(QMainWindow):
                       reference_videos=snapshot["reference_videos"], reference_audios=snapshot["reference_audios"],
                       resolution=snapshot["resolution"], aspect_ratio=snapshot["aspect_ratio"],
                       duration=snapshot["duration"])
-        if snapshot["model_id"] == SEEDANCE_MODEL_ID:
+        if model_id == SEEDANCE_MODEL_ID:
             payload = build_seedance_payload(**common,
-                enable_web_search=snapshot["enable_prompt_expansion"], generate_audio=snapshot["enable_audio"])
+                enable_web_search=snapshot["enable_prompt_expansion"], generate_audio=snapshot["enable_audio"],
+                safety_checker=snapshot["safety_checker"])
+        elif model_id == SEEDANCE_I2V_SPICY_MODEL_ID:
+            payload = build_seedance_i2v_spicy_payload(
+                image=snapshot["reference_images"][0],
+                last_image=snapshot["reference_images"][1] if len(snapshot["reference_images"]) == 2 else None,
+                prompt=snapshot["prompt"], aspect_ratio=snapshot["aspect_ratio"],
+                resolution=snapshot["resolution"], duration=snapshot["duration"],
+                generate_audio=snapshot["enable_audio"], seed=snapshot["seed"],
+                safety_checker=snapshot["safety_checker"],
+            )
         else:
             payload = build_reference_video_payload(**common,
                 enable_prompt_expansion=snapshot["enable_prompt_expansion"], enable_audio=snapshot["enable_audio"],
@@ -1707,16 +2025,26 @@ class MainWindow(QMainWindow):
         self.sogni_lora_label.setText("Sin LoRAs")
         model = self.model_combo.currentData()
         model_id = model.id if model else ""
-        if not model_id.startswith(("minimax-h3-fl2va-fp8_i2v", "minimax-h3-fastvideo-int8_i2v")):
-            self.sogni_lora_label.setText("Elegí un modelo MiniMax H3 I2V")
+        is_h3 = model_id.startswith("minimax-h3-")
+        if not is_h3:
+            self.sogni_lora_label.setText("Elegí un modelo MiniMax H3")
+        self.sogni_lora_button.setEnabled(is_h3)
+        is_i2v = model_id.startswith(("minimax-h3-fl2va-fp8_i2v", "minimax-h3-fastvideo-int8_i2v"))
+        is_r2v = "minimax-h3" in model_id.lower() and ("_r2v" in model_id.lower() or "-r2v" in model_id.lower())
+        self.frames_label.setText("Imagenes iniciales" if is_i2v else "Frames folder")
+        self.frames_picker.setVisible(not is_i2v and not is_r2v)
+        self.frames_label.setVisible(not is_i2v and not is_r2v)
+        self.sogni_reference_controls.setVisible(is_i2v or is_r2v)
+        self.sogni_reference_label.setVisible(is_i2v or is_r2v)
+        self.sogni_reference_add_button.setText("Agregar fotos" if is_i2v else "Agregar fotos/videos")
 
     def _open_sogni_loras(self) -> None:
         model = self.model_combo.currentData()
         if not model:
-            QMessageBox.information(self, "LoRAs comunitarias", "Primero actualizá el catálogo y seleccioná un modelo MiniMax H3 de imagen a video.")
+            QMessageBox.information(self, "LoRAs comunitarias", "Primero actualizá el catálogo y seleccioná un modelo MiniMax H3.")
             return
-        if not model.id.startswith(("minimax-h3-fl2va-fp8_i2v", "minimax-h3-fastvideo-int8_i2v")):
-            QMessageBox.information(self, "LoRAs comunitarias", "Las LoRAs de esta lista requieren un modelo MiniMax H3 de imagen a video.")
+        if not model.id.startswith("minimax-h3-"):
+            QMessageBox.information(self, "LoRAs comunitarias", "Las LoRAs de esta lista requieren un modelo MiniMax H3.")
             return
         dialog = SogniLoraDialog(
             self.sogni, model.id, self._selected_sogni_loras, self,
@@ -1728,6 +2056,36 @@ class MainWindow(QMainWindow):
             self.sogni_lora_label.setText(
                 ", ".join(item[0] for item in self._selected_sogni_loras) or "Sin LoRAs"
             )
+
+    def _add_sogni_references(self) -> None:
+        model = self.model_combo.currentData()
+        is_r2v = bool(model and "minimax-h3" in model.id.lower() and ("_r2v" in model.id.lower() or "-r2v" in model.id.lower()))
+        file_filter = "Images and videos (*.png *.jpg *.jpeg *.webp *.gif *.mp4 *.mov *.webm)" if is_r2v else "Images (*.png *.jpg *.jpeg *.webp *.gif)"
+        paths, _ = QFileDialog.getOpenFileNames(self, "Seleccionar referencias", filter=file_filter)
+        existing = {self.sogni_reference_list.item(i).data(Qt.UserRole) for i in range(self.sogni_reference_list.count())}
+        for path in paths:
+            if path not in existing:
+                item = QListWidgetItem(Path(path).name)
+                item.setData(Qt.UserRole, path)
+                item.setToolTip(path)
+                self.sogni_reference_list.addItem(item)
+                existing.add(path)
+
+    def _remove_sogni_references(self) -> None:
+        for item in self.sogni_reference_list.selectedItems():
+            self.sogni_reference_list.takeItem(self.sogni_reference_list.row(item))
+
+    def _move_sogni_reference(self, direction: int) -> None:
+        row = self.sogni_reference_list.currentRow()
+        target = row + direction
+        if row < 0 or not 0 <= target < self.sogni_reference_list.count():
+            return
+        item = self.sogni_reference_list.takeItem(row)
+        self.sogni_reference_list.insertItem(target, item)
+        self.sogni_reference_list.setCurrentRow(target)
+
+    def _selected_sogni_reference_paths(self) -> list[Path]:
+        return [Path(self.sogni_reference_list.item(i).data(Qt.UserRole)) for i in range(self.sogni_reference_list.count())]
 
     def _create_campaign(self) -> None:
         try:
@@ -1763,12 +2121,116 @@ class MainWindow(QMainWindow):
                 filename_template=self.template_edit.text(),
                 organization_mode=self.org_combo.currentText(),
                 concurrency=self.concurrency_spin.value(),
+                enqueue_jobs=False,
+                reference_media=self._selected_sogni_reference_paths(),
             )
             self.current_campaign_id = campaign.id
             self._load_campaigns()
             self._refresh_tables()
         except Exception as exc:
             QMessageBox.critical(self, "Create campaign", str(exc))
+
+    def _use_campaign_as_base(self) -> None:
+        if not self.current_campaign_id:
+            QMessageBox.warning(self, "Usar como base", "Seleccioná una campaña para usar como base.")
+            return
+        try:
+            clone = CampaignManager(self.repo).clone_campaign_base(self.current_campaign_id)
+            self._load_campaigns()
+            self.campaign_combo.setCurrentIndex(self.campaign_combo.findData(clone.id))
+            self.current_campaign_id = clone.id
+            self._load_campaign_configuration(clone)
+            self._editable_base_campaign_id = clone.id
+            self._refresh_tables()
+        except Exception as exc:
+            QMessageBox.critical(self, "Usar como base", str(exc))
+
+    def _add_jobs_to_selected_campaign(self) -> None:
+        if not self.current_campaign_id:
+            QMessageBox.warning(self, "Cola Sogni", "Seleccioná una campaña antes de agregar jobs.")
+            return
+        try:
+            job_settings = None
+            if self.current_campaign_id == self._editable_base_campaign_id:
+                self._save_editable_base_configuration()
+            else:
+                job_settings = build_campaign_settings(
+                    self.duration_mode_combo.currentData(),
+                    self.duration_seconds_edit.text(),
+                    self.aspect_ratio_combo.currentText(),
+                    skip_prompt_processing=self.skip_prompt_processing_check.isChecked(),
+                    loras=self._selected_sogni_loras,
+                    safe_content_filter=self.sogni_sensitive_filter_check.isChecked(),
+                )
+            added = CampaignManager(self.repo).add_jobs_to_campaign(
+                self.current_campaign_id,
+                Path(self.frames_edit.text()),
+                Path(self.prompts_edit.text()),
+                reference_media=self._selected_sogni_reference_paths(),
+                job_settings=job_settings,
+            )
+            self._refresh_tables()
+            self.summary_label.setText(
+                f"{added} job(s) agregados a la campaña #{self.current_campaign_id}."
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Cola Sogni", str(exc))
+
+    def _save_editable_base_configuration(self) -> None:
+        campaign = self.repo.get_campaign(self.current_campaign_id)
+        model = self.model_combo.currentData()
+        settings = json.loads(campaign.settings_json or "{}")
+        for key in (
+            "duration_mode", "duration", "aspectRatio", "safe_content_filter",
+            "skipPromptProcessing", "loras", "loraStrengths", "reference_media",
+        ):
+            settings.pop(key, None)
+        settings.update(build_campaign_settings(
+            self.duration_mode_combo.currentData(),
+            self.duration_seconds_edit.text(),
+            self.aspect_ratio_combo.currentText(),
+            skip_prompt_processing=self.skip_prompt_processing_check.isChecked(),
+            loras=self._selected_sogni_loras,
+            safe_content_filter=self.sogni_sensitive_filter_check.isChecked(),
+        ))
+        model_id = model.id if model else campaign.model_id
+        if "minimax-h3" in model_id.lower() and ("_r2v" in model_id.lower() or "-r2v" in model_id.lower()):
+            settings["reference_media"] = [
+                self.sogni_reference_list.item(index).data(Qt.UserRole)
+                for index in range(self.sogni_reference_list.count())
+            ]
+        campaign_id = self.current_campaign_id
+        self.repo.update_campaign_configuration(campaign_id, {
+            "name": self.name_edit.text().strip() or "Untitled Campaign",
+            "model_id": model_id,
+            "model_name": model.name if model else campaign.model_name,
+            "frames_folder": self.frames_edit.text(),
+            "prompts_source": self.prompts_edit.text(),
+            "output_folder": self.output_edit.text(),
+            "filename_template": self.template_edit.text(),
+            "organization_mode": self.org_combo.currentText(),
+            "concurrency": self.concurrency_spin.value(),
+            "settings": settings,
+        })
+        self._load_campaigns()
+        self.campaign_combo.setCurrentIndex(self.campaign_combo.findData(campaign_id))
+        self.current_campaign_id = campaign_id
+        self._editable_base_campaign_id = campaign_id
+
+    def _delete_sogni_queue_job(self, job_id: int) -> None:
+        campaign_id = self.current_campaign_id
+        if campaign_id is None or self._queue_running:
+            QMessageBox.warning(self, "Cola Sogni", "Pausá la cola antes de eliminar jobs.")
+            return
+        if QMessageBox.question(
+            self, "Eliminar job", f"¿Eliminar el job #{job_id} de la campaña seleccionada?"
+        ) != QMessageBox.Yes:
+            return
+        if not self.repo.delete_pending_job(campaign_id, job_id):
+            QMessageBox.warning(self, "Cola Sogni", "El job ya no está pendiente en esta campaña.")
+            self._refresh_tables()
+            return
+        self._refresh_tables()
 
     def _load_campaigns(self) -> None:
         self.campaign_combo.blockSignals(True)
@@ -1780,8 +2242,57 @@ class MainWindow(QMainWindow):
             self._select_campaign_from_combo()
 
     def _select_campaign_from_combo(self) -> None:
-        self.current_campaign_id = self.campaign_combo.currentData()
+        selected_id = self.campaign_combo.currentData()
+        if self._editable_base_campaign_id is not None and selected_id != self._editable_base_campaign_id:
+            self._editable_base_campaign_id = None
+        self.current_campaign_id = selected_id
+        if selected_id is not None:
+            self._load_campaign_configuration(self.repo.get_campaign(selected_id))
         self._refresh_tables()
+
+    def _load_campaign_configuration(self, campaign) -> None:
+        settings = json.loads(campaign.settings_json or "{}")
+        self.name_edit.setText(campaign.name)
+        self.frames_edit.setText(campaign.frames_folder)
+        self.prompts_edit.setText(campaign.prompts_source)
+        self.output_edit.setText(campaign.output_folder)
+        self.template_edit.setText(campaign.filename_template)
+        self.org_combo.setCurrentText(campaign.organization_mode)
+        self.concurrency_spin.setValue(campaign.concurrency)
+        model_index = -1
+        for index in range(self.model_combo.count()):
+            model = self.model_combo.itemData(index)
+            if model is not None and model.id == campaign.model_id:
+                model_index = index
+                break
+        if model_index < 0:
+            self.model_combo.addItem(campaign.model_name, ModelDescriptor(
+                id=campaign.model_id, name=campaign.model_name, media_type="video",
+            ))
+            model_index = self.model_combo.count() - 1
+        self.model_combo.setCurrentIndex(model_index)
+        mode_index = self.duration_mode_combo.findData(settings.get("duration_mode", "auto"))
+        if mode_index >= 0:
+            self.duration_mode_combo.setCurrentIndex(mode_index)
+        self.duration_seconds_edit.setText(str(settings.get("duration", 8)))
+        aspect_index = self.aspect_ratio_combo.findText(settings.get("aspectRatio", "9:16"))
+        if aspect_index >= 0:
+            self.aspect_ratio_combo.setCurrentIndex(aspect_index)
+        self.sogni_sensitive_filter_check.setChecked(settings.get("safe_content_filter", True))
+        self.skip_prompt_processing_check.setChecked(settings.get("skipPromptProcessing", True))
+        self._selected_sogni_loras = [
+            [lora_id, strength]
+            for lora_id, strength in zip(settings.get("loras", []), settings.get("loraStrengths", []))
+        ]
+        self.sogni_lora_label.setText(
+            ", ".join(item[0] for item in self._selected_sogni_loras) or "Sin LoRAs"
+        )
+        self.sogni_reference_list.clear()
+        for path in settings.get("reference_media", []):
+            item = QListWidgetItem(Path(path).name)
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            self.sogni_reference_list.addItem(item)
 
     def _refresh_tables(self) -> None:
         if not self.current_campaign_id:
@@ -1804,6 +2315,7 @@ class MainWindow(QMainWindow):
             self._set_item(self.frames_table, row, 0, str(row + 1), frame.id, editable=False)
             self._set_item(self.frames_table, row, 1, frame.filename, frame.id, editable=False)
             self._set_item(self.frames_table, row, 2, frame.outfit_name, frame.id)
+            self._set_item(self.frames_table, row, 3, f"#{row + 1}", frame.id, editable=False)
         self.frames_table.blockSignals(False)
         if frames:
             self.frames_table.selectRow(0)
@@ -1815,9 +2327,11 @@ class MainWindow(QMainWindow):
             self._set_item(self.prompts_table, row, 0, prompt.prompt_code, prompt.id, editable=False)
             self._set_item(self.prompts_table, row, 1, prompt.prompt_name, prompt.id)
             self._set_item(self.prompts_table, row, 2, prompt.prompt_text, prompt.id)
+            self._set_item(self.prompts_table, row, 3, f"#{row + 1}", prompt.id, editable=False)
         self.prompts_table.blockSignals(False)
 
         self.jobs_table.setRowCount(len(jobs))
+        self.sogni_queue_table.setRowCount(len(jobs))
         for row, job in enumerate(jobs):
             frame = frame_by_id[job.frame_id]
             prompt = prompt_by_id[job.prompt_id]
@@ -1830,10 +2344,35 @@ class MainWindow(QMainWindow):
                 str(job.attempt_count),
             ]):
                 self._set_item(self.jobs_table, row, col, text, job.id, editable=False)
-            if job.status == "FAILED":
+            self._set_item(self.jobs_table, row, 7, f"#{row + 1}", job.id, editable=False)
+            self._populate_campaign_job_row(
+                self.sogni_queue_table,
+                row,
+                job,
+                [frame.filename, prompt.prompt_name, campaign.model_name],
+            )
+            if job.status in {"FAILED", "DONE"}:
                 retry = QPushButton("Reintentar")
                 retry.clicked.connect(lambda checked=False, job_id=job.id: self._retry_job(job_id))
                 self.jobs_table.setCellWidget(row, 6, retry)
+
+    def _populate_campaign_job_row(self, table: QTableWidget, row: int, job, details: list[str]) -> None:
+        values = [
+            str(job.order_index),
+            *details,
+            _job_status_label(job.status),
+            str(job.attempt_count),
+        ]
+        for column, value in enumerate(values):
+            self._set_item(table, row, column, value, job.id, editable=False)
+        if job.status in {"FAILED", "DONE"}:
+            retry = QPushButton("Reintentar")
+            retry.clicked.connect(lambda checked=False, job_id=job.id: self._retry_job(job_id))
+            table.setCellWidget(row, 6, retry)
+        elif job.status == "PENDING" and job.workflow_id is None:
+            delete = QPushButton("Eliminar")
+            delete.clicked.connect(lambda checked=False, job_id=job.id: self._delete_sogni_queue_job(job_id))
+            table.setCellWidget(row, 6, delete)
 
     def _set_item(self, table: QTableWidget, row: int, col: int, text: str, record_id: int, editable: bool = True) -> None:
         item = QTableWidgetItem(text)

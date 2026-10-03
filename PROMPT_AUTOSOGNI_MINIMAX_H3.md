@@ -305,4 +305,3 @@ determinarse con seguridad, no inventes ni corrijas el contenido: devuelve únic
 JSON de error, sin generar un prompt creativo alterado:
 {"error":"VALIDATION_ERROR","details":["Explica aquí el requisito que no pudo verificarse."]}
 Cuando no haya error, responde únicamente con el array JSON final.
-

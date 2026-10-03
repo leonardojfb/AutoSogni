@@ -44,6 +44,11 @@ class SogniClient:
         "minimax-h3-fl2va-fp8_i2v_turbo": "minimax-h3-i2v-turbo",
         "minimax-h3-fastvideo-int8_i2v_turbo": "minimax-h3-fasth3-i2v-turbo",
         "minimax-h3-fastvideo-int8_i2v_turbo_2stage": "minimax-h3-fasth3-i2v-turbo-2stage",
+        "minimax-h3-ref2va-fp8_r2v": "minimax-h3-r2v",
+        "minimax-h3-ref2va-fp8_r2v_balanced": "minimax-h3-r2v-balanced",
+        "minimax-h3-ref2va-fp8_r2v_turbo": "minimax-h3-r2v-turbo",
+        "minimax-h3-ref2va-fp8_r2v_2stage": "minimax-h3-r2v-2stage",
+        "minimax-h3-ref2va-fp8_r2v_balanced_2stage": "minimax-h3-r2v-balanced-2stage",
     }
     EXTERNAL_REFERENCE_MODEL_PREFIXES = ("seedance", "happyhorse", "wan3", "wan-3")
 
@@ -121,8 +126,13 @@ class SogniClient:
         media_reference: dict[str, Any] | None,
         idempotency_key: str,
         skip_prompt_processing: bool = True,
+        media_references: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        validate_minimax_h3_prompt(prompt, model_id)
+        if _is_minimax_r2v(model_id):
+            from app.core.validators import validate_minimax_h3_r2v_prompt
+            validate_minimax_h3_r2v_prompt(prompt)
+        else:
+            validate_minimax_h3_prompt(prompt, model_id)
         payload = self.build_image_to_video_payload(
             title,
             prompt,
@@ -130,6 +140,7 @@ class SogniClient:
             settings,
             media_reference,
             skip_prompt_processing=skip_prompt_processing,
+            media_references=media_references,
         )
         log.info("Posting workflow payload: %s", json.dumps(payload, ensure_ascii=False, indent=2, default=str))
         response = self._client.post("/v1/creative-agent/workflows", headers=self._headers(idempotency_key), json=payload)
@@ -186,6 +197,32 @@ class SogniClient:
         upload["_type"] = "startingImage"
         upload["_content_type"] = content_type
         return upload
+
+    def upload_reference_media(self, job_id: str, media_path: Path) -> dict[str, Any]:
+        suffix = media_path.suffix.lower()
+        is_image = suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+        content_type = _detect_image_content_type(media_path) if is_image else (
+            "video/quicktime" if suffix == ".mov" else "video/webm" if suffix == ".webm" else "video/mp4"
+        )
+        kind = "image" if is_image else "video"
+        endpoint = "/v1/image/uploadUrl" if is_image else "/v1/media/uploadUrl"
+        media_type = "referenceImage" if is_image else "referenceVideo"
+        query = {"jobId": job_id, "type": media_type, "contentType": content_type}
+        response = self._client.get(endpoint, headers=self._headers(), params=query)
+        response.raise_for_status()
+        upload_url = response.json().get("data", {}).get("uploadUrl")
+        if not upload_url:
+            raise RuntimeError(f"Sogni did not return an upload URL for {media_path}.")
+        with media_path.open("rb") as handle:
+            upload_response = httpx.put(upload_url, content=handle.read(), headers={"Content-Type": content_type})
+        upload_response.raise_for_status()
+        download_endpoint = "/v1/image/downloadUrl" if is_image else "/v1/media/downloadUrl"
+        download_response = self._client.get(download_endpoint, headers=self._headers(), params=query)
+        download_response.raise_for_status()
+        download_url = download_response.json().get("data", {}).get("downloadUrl")
+        if not download_url:
+            raise RuntimeError(f"Sogni did not return a download URL for {media_path}.")
+        return {"kind": kind, "url": download_url}
 
     def upload_image_to_presigned_post(self, upload: dict[str, Any], image_path: Path) -> dict[str, Any]:
         fields = upload["fields"]
@@ -248,11 +285,30 @@ class SogniClient:
         settings: dict[str, Any],
         media_reference: dict[str, Any] | None,
         skip_prompt_processing: bool = True,
+        media_references: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         workflow_model_id = SogniClient.WORKFLOW_MODEL_ALIASES.get(model_id, model_id)
         arguments: dict[str, Any] = {"prompt": prompt, "videoModel": workflow_model_id}
         arguments.update({key: value for key, value in settings.items() if key != "safe_content_filter" and value not in ("", None)})
 
+        if _is_minimax_r2v(model_id):
+            refs = [SogniClient._normalize_media_reference(reference) for reference in (media_references or [])]
+            refs = [reference for reference in refs if reference]
+            images = [index for index, ref in enumerate(refs) if ref["kind"] == "image"]
+            videos = [index for index, ref in enumerate(refs) if ref["kind"] == "video"]
+            if not images and not videos:
+                raise ValueError("MiniMax H3 R2V requires at least one image or video reference.")
+            if images:
+                arguments["referenceImageIndices"] = [-(index + 1) for index in range(len(images))]
+            if videos:
+                arguments["referenceVideoIndices"] = [-(index + 1) for index in range(len(videos))]
+                arguments["sourceAudioPolicy"] = "replace"
+            arguments["skipPromptProcessing"] = True
+            payload = {"input": {"title": title, "steps": [{"id": "clip", "toolName": "generate_video", "arguments": arguments}]},
+                       "token_type": "auto", "confirm_cost": True, "media_references": refs}
+            if settings.get("safe_content_filter") is False:
+                payload["safe_content_filter"] = False
+            return payload
         normalized_reference = SogniClient._normalize_media_reference(media_reference)
         tool_name = "generate_video"
         if model_id.startswith(("minimax-h3-fl2va-fp8_i2v", "minimax-h3-fastvideo-int8_i2v")) or workflow_model_id.startswith(("minimax-h3-i2v", "minimax-h3-fasth3-i2v")):
@@ -285,3 +341,8 @@ class SogniClient:
     def _supports_external_reference_url(model_id: str) -> bool:
         normalized = model_id.lower().replace("_", "-")
         return normalized.startswith(SogniClient.EXTERNAL_REFERENCE_MODEL_PREFIXES)
+
+
+def _is_minimax_r2v(model_id: str) -> bool:
+    normalized = model_id.lower()
+    return "minimax-h3" in normalized and ("_r2v" in normalized or "-r2v" in normalized)

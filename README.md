@@ -11,6 +11,20 @@ py -m app.main
 
 Set `SOGNI_API_KEY` or save it in the Settings tab. The app stores local state in `data/app.db`.
 
+## Recover an older campaign
+
+Use `RecuperarCampana.bat` for the interactive recovery utility, or run
+`python scripts/recover_campaign.py --help` for command-line options. Provide
+the original frame folder, prompt source file, and output folder. The tool
+previews matches without changing the database; in interactive mode, type
+`RECUPERAR` to apply. It marks uniquely matched videos as `DONE`, leaves
+unmatched jobs `PENDING`, and creates a SQLite backup before writing. Supply
+the original model ID/name and settings JSON so pending jobs can be resumed
+with the intended configuration. For command-line use, settings can be passed
+as `--settings-json` or read from a UTF-8 file with `--settings-file`.
+The standalone `dist\RecuperarCampana.exe` runs without a Python installation.
+Close AutoSogni before applying recovery to avoid concurrent database changes.
+
 ## Current Flow
 
 1. Fetch video models from Sogni.
@@ -30,6 +44,11 @@ shows `My LoRAs` and the import form. Personal imports require rights
 confirmation and can remain queued until Sogni marks them ready. Trigger words
 must be included in the prompt you supply; the app does not change prompt text.
 Existing campaigns retain their saved settings.
+
+On the Campaign tab, `Agregar jobs a campaña seleccionada` appends new frame
+and prompt combinations to the selected campaign. `Cola Sogni` lists its jobs
+and statuses; repeating an identical frame and prompt combination does not
+create another job.
 
 ## WaveSpeedAI tab
 

@@ -101,6 +101,233 @@ def test_campaign_creation_persists_full_matrix_before_running(tmp_path: Path):
     }
 
 
+def test_clone_campaign_base_copies_r2v_metadata_without_work_items(tmp_path: Path):
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(b"reference")
+    prompt_source = tmp_path / "prompts.json"
+    prompt_source.write_text('[{"id":"P01","name":"One","text":"Prompt"}]', encoding="utf-8")
+    source_settings = {
+        "loras": [{"id": "lora-1", "name": "Style"}],
+        "loraStrengths": [0.65],
+        "reference_media": [str(reference)],
+    }
+    manager = CampaignManager(repo)
+    source_id = repo.insert_campaign(
+        {
+            "name": "R2V campaign",
+            "status": "RUNNING",
+            "model_id": "minimax-h3-fl2va-fp8_r2v_balanced",
+            "model_name": "MiniMax H3 R2V",
+            "frames_folder": str(tmp_path / "frames"),
+            "prompts_source": str(prompt_source),
+            "output_folder": str(tmp_path / "out"),
+            "filename_template": "{prompt_id}.mp4",
+            "organization_mode": "flat",
+            "concurrency": 3,
+            "settings_json": json.dumps(source_settings),
+        }
+    )
+    source_frame_id = repo.insert_frame(source_id, str(reference), reference.name, "Reference", "source-hash")
+    source_prompt_id = repo.insert_prompt(source_id, "P01", "One", "Prompt")
+    repo.insert_job(source_id, source_frame_id, source_prompt_id, 1, f"source:{source_id}:0001")
+    source = repo.get_campaign(source_id)
+    source_snapshot = source
+    source_work_counts = (len(repo.list_frames(source.id)), len(repo.list_prompts(source.id)), repo.count_jobs(source.id))
+
+    clone = manager.clone_campaign_base(source.id)
+
+    assert clone.id != source.id
+    assert clone.name == "R2V campaign (copia)"
+    assert clone.status == "READY"
+    assert clone.model_id == source.model_id
+    assert clone.model_name == source.model_name
+    assert clone.frames_folder == source.frames_folder
+    assert clone.prompts_source == source.prompts_source
+    assert clone.output_folder == source.output_folder
+    assert clone.filename_template == source.filename_template
+    assert clone.organization_mode == source.organization_mode
+    assert clone.concurrency == source.concurrency
+    assert json.loads(clone.settings_json) == json.loads(source.settings_json)
+    assert len(repo.list_frames(clone.id)) == 0
+    assert len(repo.list_prompts(clone.id)) == 0
+    assert repo.count_jobs(clone.id) == 0
+    assert repo.get_campaign(source.id) == source_snapshot
+    assert (len(repo.list_frames(source.id)), len(repo.list_prompts(source.id)), repo.count_jobs(source.id)) == source_work_counts
+    with db.connect() as conn:
+        history = conn.execute(
+            "SELECT started_at, completed_at FROM campaigns WHERE id = ?", (clone.id,)
+        ).fetchone()
+    assert tuple(history) == (None, None)
+
+
+def test_delete_pending_job_is_scoped_and_rejects_started_jobs(tmp_path: Path):
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "one.png").write_bytes(b"one")
+    prompts = tmp_path / "prompts.json"
+    prompts.write_text('[{"id":"P01","name":"One","text":"Prompt"}]', encoding="utf-8")
+    manager = CampaignManager(repo)
+    campaigns = [manager.create_campaign(
+        name=name, frames_folder=frames, prompts_source=prompts,
+        output_folder=tmp_path / name,
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={},
+    ) for name in ("First", "Second")]
+    first_job = repo.list_jobs(campaigns[0].id)[0]
+    second_job = repo.list_jobs(campaigns[1].id)[0]
+
+    assert not repo.delete_pending_job(campaigns[0].id, second_job.id)
+    assert repo.count_jobs(campaigns[1].id) == 1
+    assert repo.claim_next_job(campaigns[0].id).id == first_job.id
+    assert not repo.delete_pending_job(campaigns[0].id, first_job.id)
+    assert repo.delete_pending_job(campaigns[1].id, second_job.id)
+    assert repo.count_jobs(campaigns[0].id) == 1
+    assert repo.count_jobs(campaigns[1].id) == 0
+
+
+def test_retry_completed_job_clears_previous_generation_state(tmp_path: Path):
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    (frames_dir / "one.png").write_bytes(b"one")
+    prompt_source = tmp_path / "prompts.json"
+    prompt_source.write_text('[{"id":"P01","name":"One","text":"Prompt"}]', encoding="utf-8")
+    campaign = CampaignManager(repo).create_campaign(
+        name="Retry", frames_folder=frames_dir, prompts_source=prompt_source,
+        output_folder=tmp_path / "out",
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={},
+    )
+    job = repo.list_jobs(campaign.id)[0]
+    with db.connect() as conn:
+        conn.execute(
+            """UPDATE jobs SET status='DONE', workflow_id='old-workflow', artifact_url='old-artifact',
+               output_file='old-output.mp4', last_error='old-error', completed_at='old-time',
+               downloaded_at='old-time', remote_completed_at='old-time', attempt_count=2 WHERE id=?""",
+            (job.id,),
+        )
+
+    repo.retry_job(job.id)
+
+    retried = repo.get_job(job.id)
+    assert retried.status == "RETRY_WAIT"
+    assert retried.workflow_id is None
+    assert retried.artifact_url is None
+    assert retried.output_file is None
+    assert retried.last_error is None
+    with db.connect() as conn:
+        timestamps = conn.execute(
+            "SELECT completed_at, downloaded_at, remote_completed_at FROM jobs WHERE id=?", (job.id,)
+        ).fetchone()
+    assert tuple(timestamps) == (None, None, None)
+    assert retried.idempotency_key != job.idempotency_key
+
+
+def test_add_jobs_to_existing_campaign_keeps_campaign_and_orders_jobs_after_existing(tmp_path: Path):
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    (frames_dir / "outfit_01_pink_dress.png").write_bytes(b"pink")
+    prompt_source = tmp_path / "prompts.json"
+    prompt_source.write_text(json.dumps([{"id": "P01", "name": "One", "text": "First"}]), encoding="utf-8")
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    manager = CampaignManager(repo)
+    campaign = manager.create_campaign(
+        name="Existing",
+        frames_folder=frames_dir,
+        prompts_source=prompt_source,
+        output_folder=tmp_path / "out",
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={},
+    )
+
+    extra_frames = tmp_path / "extra_frames"
+    extra_frames.mkdir()
+    (extra_frames / "outfit_02_black_top.png").write_bytes(b"black")
+    extra_prompts = tmp_path / "extra_prompts.json"
+    extra_prompts.write_text(
+        json.dumps([
+            {"id": "P02", "name": "Two", "text": "Second"},
+            {"id": "P03", "name": "Three", "text": "Third"},
+        ]),
+        encoding="utf-8",
+    )
+
+    added = manager.add_jobs_to_campaign(campaign.id, extra_frames, extra_prompts)
+
+    jobs = repo.list_jobs(campaign.id)
+    assert added == 2
+    assert repo.get_campaign(campaign.id).id == campaign.id
+    assert [job.order_index for job in jobs] == [1, 2, 3]
+    assert [job.idempotency_key for job in jobs] == [
+        f"sva:{campaign.id}:0001", f"sva:{campaign.id}:0002", f"sva:{campaign.id}:0003"
+    ]
+
+
+def test_readding_identical_frame_prompt_pairs_does_not_duplicate_jobs(tmp_path: Path):
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    (frames_dir / "outfit_01_pink_dress.png").write_bytes(b"pink")
+    prompt_source = tmp_path / "prompts.json"
+    prompt_source.write_text(json.dumps([{"id": "P01", "name": "One", "text": "First"}]), encoding="utf-8")
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    campaign = CampaignManager(repo).create_campaign(
+        name="Existing",
+        frames_folder=frames_dir,
+        prompts_source=prompt_source,
+        output_folder=tmp_path / "out",
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={},
+    )
+
+    added = CampaignManager(repo).add_jobs_to_campaign(campaign.id, frames_dir, prompt_source)
+
+    assert added == 0
+    assert repo.count_jobs(campaign.id) == 1
+    assert len(repo.list_frames(campaign.id)) == 1
+    assert len(repo.list_prompts(campaign.id)) == 1
+
+
+def test_adding_same_pair_with_changed_loras_creates_a_settings_variant(tmp_path: Path):
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    (frames_dir / "outfit_01_pink_dress.png").write_bytes(b"pink")
+    prompt_source = tmp_path / "prompts.json"
+    prompt_source.write_text(json.dumps([{"id": "P01", "name": "One", "text": "First"}]), encoding="utf-8")
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    manager = CampaignManager(repo)
+    campaign = manager.create_campaign(
+        name="Variants",
+        frames_folder=frames_dir,
+        prompts_source=prompt_source,
+        output_folder=tmp_path / "out",
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={"duration_mode": "manual", "duration": 8},
+    )
+    repo.update_campaign_settings(campaign.id, {"duration_mode": "manual", "duration": 8, "loras": ["style-a"], "loraStrengths": [0.7]})
+
+    added = manager.add_jobs_to_campaign(campaign.id, frames_dir, prompt_source)
+
+    jobs = repo.list_jobs(campaign.id)
+    assert added == 1
+    assert len(jobs) == 2
+    assert json.loads(jobs[0].settings_json).get("loras", []) == []
+    assert json.loads(jobs[1].settings_json)["loras"] == ["style-a"]
+
+
 def test_atomic_job_claim_claims_one_pending_job(tmp_path: Path):
     db = Database(tmp_path / "app.db")
     db.initialize()
