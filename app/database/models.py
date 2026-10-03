@@ -53,3 +53,5 @@ class Job:
     attempt_count: int
     last_error: str | None
     rendered_prompt: str = ""
+    reference_media_json: str = "[]"
+    settings_json: str = "{}"

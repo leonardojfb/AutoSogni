@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
+    QCheckBox, QDialog, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
     QVBoxLayout,
 )
 
 from app.sogni.loras import validate_lora_selection
+from app.ui.numeric_inputs import WheelSafeDoubleSpinBox
 
 
 class _CatalogWorker(QThread):
@@ -147,7 +148,7 @@ class SogniLoraDialog(QDialog):
             ui = row.get("ui") or {}
             details = QTableWidgetItem(row.get("description", "").replace("\n", " "))
             details.setToolTip(row.get("description", ""))
-            strength = QDoubleSpinBox()
+            strength = WheelSafeDoubleSpinBox()
             strength.setDecimals(2)
             strength.setSingleStep(float(ui.get("step") or 0.05))
             strength.setRange(max(0.01, float(ui.get("min", 0))), min(1.0, float(ui.get("max", 1))) if lora_id.startswith("personal-") else float(ui.get("max", 1)))

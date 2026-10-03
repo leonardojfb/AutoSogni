@@ -19,6 +19,30 @@ class CampaignRepository:
             cur = conn.execute(f"INSERT INTO campaigns ({columns}) VALUES ({placeholders})", tuple(data.values()))
             return int(cur.lastrowid)
 
+    def update_campaign_settings(self, campaign_id: int, settings: dict[str, Any]) -> None:
+        with self.db.connect() as conn:
+            conn.execute(
+                "UPDATE campaigns SET settings_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(settings), utc_now_iso(), campaign_id),
+            )
+
+    def update_campaign_configuration(self, campaign_id: int, data: dict[str, Any]) -> None:
+        with self.db.connect() as conn:
+            conn.execute(
+                """
+                UPDATE campaigns SET name = ?, model_id = ?, model_name = ?,
+                    frames_folder = ?, prompts_source = ?, output_folder = ?,
+                    filename_template = ?, organization_mode = ?, concurrency = ?,
+                    settings_json = ?, updated_at = ? WHERE id = ?
+                """,
+                (
+                    data["name"], data["model_id"], data["model_name"],
+                    data["frames_folder"], data["prompts_source"], data["output_folder"],
+                    data["filename_template"], data["organization_mode"], data["concurrency"],
+                    json.dumps(data["settings"]), utc_now_iso(), campaign_id,
+                ),
+            )
+
     def insert_frame(self, campaign_id: int, file_path: str, filename: str, outfit_name: str, sha256: str) -> int:
         with self.db.connect() as conn:
             cur = conn.execute(
@@ -35,14 +59,15 @@ class CampaignRepository:
             )
             return int(cur.lastrowid)
 
-    def insert_job(self, campaign_id: int, frame_id: int, prompt_id: int, order_index: int, idempotency_key: str) -> int:
+    def insert_job(self, campaign_id: int, frame_id: int, prompt_id: int, order_index: int, idempotency_key: str,
+                   reference_media: list[str] | None = None, settings: dict[str, Any] | None = None) -> int:
         with self.db.connect() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO jobs (campaign_id, frame_id, prompt_id, order_index, status, idempotency_key)
-                VALUES (?, ?, ?, ?, 'PENDING', ?)
+                INSERT INTO jobs (campaign_id, frame_id, prompt_id, order_index, status, idempotency_key, reference_media_json, settings_json)
+                VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?)
                 """,
-                (campaign_id, frame_id, prompt_id, order_index, idempotency_key),
+                (campaign_id, frame_id, prompt_id, order_index, idempotency_key, json.dumps(reference_media or []), json.dumps(settings or {})),
             )
             return int(cur.lastrowid)
 
@@ -276,4 +301,6 @@ def _job(row) -> Job:
         attempt_count=row["attempt_count"],
         last_error=row["last_error"],
         rendered_prompt=row["rendered_prompt"] if "rendered_prompt" in row.keys() else "",
+        reference_media_json=row["reference_media_json"] if "reference_media_json" in row.keys() else "[]",
+        settings_json=row["settings_json"] if "settings_json" in row.keys() else "{}",
     )

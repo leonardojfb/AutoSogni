@@ -8,9 +8,11 @@ from app.wavespeed.client import WaveSpeedClient
 from app.wavespeed.history import WaveSpeedHistoryStore
 from app.wavespeed.validation import (
     SEEDANCE_MODEL_ID,
+    SEEDANCE_I2V_SPICY_MODEL_ID,
     FLUX_MODEL_ID,
     FACE_SWAP_MODEL_ID,
     build_seedance_payload,
+    build_seedance_i2v_spicy_payload,
     build_flux_payload,
     build_face_swap_payload,
     build_reference_video_payload,
@@ -23,11 +25,49 @@ def test_seedance_accepts_text_only_and_uses_only_its_documented_fields():
     payload = build_seedance_payload(prompt="Exact scene", duration=15, resolution="4k",
                                      aspect_ratio="21:9", enable_web_search=True, generate_audio=False)
     assert payload == {"prompt": "Exact scene", "resolution": "4k", "aspect_ratio": "21:9",
-                       "duration": 15, "enable_web_search": True, "generate_audio": False}
+                       "duration": 15, "enable_web_search": True, "generate_audio": False,
+                       "safety_checker": True}
     with pytest.raises(ValueError, match="4 to 15"):
         build_seedance_payload(prompt="Scene", duration=16)
     with pytest.raises(ValueError, match="at most 3 reference_videos"):
         build_seedance_payload(prompt="Scene", reference_videos=["url"] * 4)
+
+
+def test_seedance_spicy_builds_exact_image_to_video_fields():
+    payload = build_seedance_i2v_spicy_payload(
+        image="https://cdn.test/start.png",
+        last_image="https://cdn.test/end.png",
+        prompt="Walk toward the camera",
+        aspect_ratio="21:9",
+        resolution="4k",
+        duration=15,
+        generate_audio=False,
+        seed=42,
+    )
+
+    assert payload == {
+        "image": "https://cdn.test/start.png",
+        "last_image": "https://cdn.test/end.png",
+        "prompt": "Walk toward the camera",
+        "aspect_ratio": "21:9",
+        "resolution": "4k",
+        "duration": 15,
+        "generate_audio": False,
+        "seed": 42,
+        "safety_checker": True,
+    }
+
+
+def test_seedance_spicy_omits_automatic_ratio_and_requires_start_image():
+    assert build_seedance_i2v_spicy_payload(image="https://cdn.test/start.png") == {
+        "image": "https://cdn.test/start.png",
+        "resolution": "720p",
+        "duration": 5,
+        "generate_audio": True,
+        "safety_checker": True,
+    }
+    with pytest.raises(ValueError, match="requires a public start-image URL"):
+        build_seedance_i2v_spicy_payload(image="")
 
 
 def test_flux_requires_images_and_keeps_optional_size():
@@ -54,7 +94,12 @@ def test_face_swap_requires_base_and_identity_images():
 
 @pytest.mark.parametrize("model_id,payload", [
     (SEEDANCE_MODEL_ID, {"prompt": "Scene", "duration": 5, "resolution": "720p",
-                         "aspect_ratio": "16:9", "enable_web_search": False, "generate_audio": True}),
+                         "aspect_ratio": "16:9", "enable_web_search": False, "generate_audio": True,
+                         "safety_checker": False}),
+    (SEEDANCE_I2V_SPICY_MODEL_ID, {"image": "https://cdn.test/start.png",
+                                  "last_image": "https://cdn.test/end.png", "prompt": "Move",
+                                  "duration": 8, "resolution": "1080p", "aspect_ratio": "9:16",
+                                  "generate_audio": True, "seed": -1, "safety_checker": False}),
     (FLUX_MODEL_ID, {"prompt": "Edit", "images": ["https://cdn/image.png"], "seed": -1,
                      "enable_sync_mode": False, "enable_base64_output": False}),
     (FACE_SWAP_MODEL_ID, {"image": "https://cdn/target.png", "face_image": "https://cdn/identity.png",

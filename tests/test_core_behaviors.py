@@ -101,6 +101,68 @@ def test_campaign_creation_persists_full_matrix_before_running(tmp_path: Path):
     }
 
 
+def test_clone_campaign_base_copies_r2v_metadata_without_work_items(tmp_path: Path):
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(b"reference")
+    prompt_source = tmp_path / "prompts.json"
+    prompt_source.write_text('[{"id":"P01","name":"One","text":"Prompt"}]', encoding="utf-8")
+    source_settings = {
+        "loras": [{"id": "lora-1", "name": "Style"}],
+        "loraStrengths": [0.65],
+        "reference_media": [str(reference)],
+    }
+    manager = CampaignManager(repo)
+    source_id = repo.insert_campaign(
+        {
+            "name": "R2V campaign",
+            "status": "RUNNING",
+            "model_id": "minimax-h3-fl2va-fp8_r2v_balanced",
+            "model_name": "MiniMax H3 R2V",
+            "frames_folder": str(tmp_path / "frames"),
+            "prompts_source": str(prompt_source),
+            "output_folder": str(tmp_path / "out"),
+            "filename_template": "{prompt_id}.mp4",
+            "organization_mode": "flat",
+            "concurrency": 3,
+            "settings_json": json.dumps(source_settings),
+        }
+    )
+    source_frame_id = repo.insert_frame(source_id, str(reference), reference.name, "Reference", "source-hash")
+    source_prompt_id = repo.insert_prompt(source_id, "P01", "One", "Prompt")
+    repo.insert_job(source_id, source_frame_id, source_prompt_id, 1, f"source:{source_id}:0001")
+    source = repo.get_campaign(source_id)
+    source_snapshot = source
+    source_work_counts = (len(repo.list_frames(source.id)), len(repo.list_prompts(source.id)), repo.count_jobs(source.id))
+
+    clone = manager.clone_campaign_base(source.id)
+
+    assert clone.id != source.id
+    assert clone.name == "R2V campaign (copia)"
+    assert clone.status == "READY"
+    assert clone.model_id == source.model_id
+    assert clone.model_name == source.model_name
+    assert clone.frames_folder == source.frames_folder
+    assert clone.prompts_source == source.prompts_source
+    assert clone.output_folder == source.output_folder
+    assert clone.filename_template == source.filename_template
+    assert clone.organization_mode == source.organization_mode
+    assert clone.concurrency == source.concurrency
+    assert json.loads(clone.settings_json) == json.loads(source.settings_json)
+    assert len(repo.list_frames(clone.id)) == 0
+    assert len(repo.list_prompts(clone.id)) == 0
+    assert repo.count_jobs(clone.id) == 0
+    assert repo.get_campaign(source.id) == source_snapshot
+    assert (len(repo.list_frames(source.id)), len(repo.list_prompts(source.id)), repo.count_jobs(source.id)) == source_work_counts
+    with db.connect() as conn:
+        history = conn.execute(
+            "SELECT started_at, completed_at FROM campaigns WHERE id = ?", (clone.id,)
+        ).fetchone()
+    assert tuple(history) == (None, None)
+
+
 def test_delete_pending_job_is_scoped_and_rejects_started_jobs(tmp_path: Path):
     db = Database(tmp_path / "app.db")
     db.initialize()
@@ -235,6 +297,35 @@ def test_readding_identical_frame_prompt_pairs_does_not_duplicate_jobs(tmp_path:
     assert repo.count_jobs(campaign.id) == 1
     assert len(repo.list_frames(campaign.id)) == 1
     assert len(repo.list_prompts(campaign.id)) == 1
+
+
+def test_adding_same_pair_with_changed_loras_creates_a_settings_variant(tmp_path: Path):
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    (frames_dir / "outfit_01_pink_dress.png").write_bytes(b"pink")
+    prompt_source = tmp_path / "prompts.json"
+    prompt_source.write_text(json.dumps([{"id": "P01", "name": "One", "text": "First"}]), encoding="utf-8")
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    repo = CampaignRepository(db)
+    manager = CampaignManager(repo)
+    campaign = manager.create_campaign(
+        name="Variants",
+        frames_folder=frames_dir,
+        prompts_source=prompt_source,
+        output_folder=tmp_path / "out",
+        model=ModelDescriptor(id="wan22", name="WAN 2.2", media_type="video", parameters={}),
+        settings={"duration_mode": "manual", "duration": 8},
+    )
+    repo.update_campaign_settings(campaign.id, {"duration_mode": "manual", "duration": 8, "loras": ["style-a"], "loraStrengths": [0.7]})
+
+    added = manager.add_jobs_to_campaign(campaign.id, frames_dir, prompt_source)
+
+    jobs = repo.list_jobs(campaign.id)
+    assert added == 1
+    assert len(jobs) == 2
+    assert json.loads(jobs[0].settings_json).get("loras", []) == []
+    assert json.loads(jobs[1].settings_json)["loras"] == ["style-a"]
 
 
 def test_atomic_job_claim_claims_one_pending_job(tmp_path: Path):

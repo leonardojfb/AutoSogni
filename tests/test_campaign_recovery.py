@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.database.db import Database
+from app.database.db import DB_VERSION, Database
 from scripts.recover_campaign import match_outputs, scan_inputs
 from scripts.recover_campaign import (
     RecoveryCampaignInput,
@@ -253,7 +253,7 @@ def test_backup_is_taken_before_schema_migration(tmp_path: Path):
     with db.connect() as conn:
         current_columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
         assert "rendered_prompt" in current_columns
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == DB_VERSION
 
 
 def test_apply_recovery_rejects_an_identical_campaign(tmp_path: Path):
