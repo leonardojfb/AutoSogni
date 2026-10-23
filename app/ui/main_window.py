@@ -47,11 +47,16 @@ from app.wavespeed.validation import (
     SEEDANCE_I2V_SPICY_MODEL_ID,
     FLUX_MODEL_ID,
     FACE_SWAP_MODEL_ID,
+    NANO_BANANA_PRO_MODEL_ID,
+    QWEN_IMAGE_3_EDIT_MODEL_ID,
+    IMAGE_EDIT_ASPECT_RATIOS,
     build_reference_video_payload,
     build_seedance_payload,
     build_seedance_i2v_spicy_payload,
     build_flux_payload,
     build_face_swap_payload,
+    build_nano_banana_pro_payload,
+    build_qwen_image_3_edit_payload,
     validate_local_reference_file,
 )
 
@@ -776,11 +781,234 @@ class MainWindow(QMainWindow):
     def _images_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        image_tabs = QTabWidget()
-        image_tabs.addTab(self._face_swap_tab(), "Face Swap")
-        image_tabs.addTab(self._flux_tab(), "Flux Edit")
-        layout.addWidget(image_tabs)
+        self.image_tabs = QTabWidget()
+        self._image_edit_controls = {}
+        self.image_tabs.addTab(self._face_swap_tab(), "Face Swap")
+        self.image_tabs.addTab(self._flux_tab(), "Flux Edit")
+        self.image_tabs.addTab(self._image_edit_tab("nano_banana"), "Nano Banana Pro")
+        self.image_tabs.addTab(self._image_edit_tab("qwen_image"), "Qwen Image 3.0 Edit")
+        layout.addWidget(self.image_tabs)
         return page
+
+    def _image_edit_tab(self, key: str) -> QWidget:
+        nano_banana = key == "nano_banana"
+        model_id = NANO_BANANA_PRO_MODEL_ID if nano_banana else QWEN_IMAGE_3_EDIT_MODEL_ID
+        maximum = 14 if nano_banana else 3
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        description = (
+            "Google Nano Banana Pro: edición con hasta 14 imágenes, salida hasta 4k y PNG o JPEG."
+            if nano_banana else
+            "Alibaba Qwen Image 3.0 Edit: edición con 1 a 3 imágenes, hasta 2k, expansión de prompt y seed."
+        )
+        layout.addWidget(QLabel(f"{model_id} · {description}"))
+        prompt = QTextEdit()
+        prompt.setPlaceholderText("Indicá qué debe cambiar y qué elementos deben conservarse.")
+        layout.addWidget(QLabel("Prompt"))
+        layout.addWidget(prompt)
+        images = QListWidget()
+        images.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        layout.addWidget(QLabel(f"Imágenes de entrada (1–{maximum})"))
+        layout.addWidget(images)
+        image_buttons = QHBoxLayout()
+        add = QPushButton("Agregar imágenes")
+        add.clicked.connect(lambda: self._image_edit_add_images(key))
+        remove = QPushButton("Quitar seleccionadas")
+        remove.clicked.connect(lambda: self._image_edit_remove_images(key))
+        move_up = QPushButton("↑")
+        move_up.clicked.connect(lambda: self._image_edit_move_image(key, -1))
+        move_down = QPushButton("↓")
+        move_down.clicked.connect(lambda: self._image_edit_move_image(key, 1))
+        for button in (add, remove, move_up, move_down):
+            image_buttons.addWidget(button)
+        layout.addLayout(image_buttons)
+        options = QGridLayout()
+        aspect = QComboBox()
+        aspect.addItem("Usar la relación de la primera imagen", "")
+        for ratio in IMAGE_EDIT_ASPECT_RATIOS:
+            aspect.addItem(ratio, ratio)
+        resolution = QComboBox()
+        resolution.addItems(["1k", "2k", "4k"] if nano_banana else ["1k", "2k"])
+        options.addWidget(QLabel("Relación"), 0, 0)
+        options.addWidget(aspect, 0, 1)
+        options.addWidget(QLabel("Resolución"), 1, 0)
+        options.addWidget(resolution, 1, 1)
+        controls = {"prompt": prompt, "images": images, "aspect": aspect, "resolution": resolution,
+                    "maximum": maximum, "model_id": model_id}
+        if nano_banana:
+            output_format = QComboBox()
+            output_format.addItems(["png", "jpeg"])
+            sync = QCheckBox("enable_sync_mode")
+            base64_output = QCheckBox("enable_base64_output")
+            options.addWidget(QLabel("Formato"), 2, 0)
+            options.addWidget(output_format, 2, 1)
+            options.addWidget(sync, 3, 0)
+            options.addWidget(base64_output, 3, 1)
+            controls.update({"output_format": output_format, "sync": sync, "base64": base64_output})
+            self.nano_banana_images = images
+            self.nano_banana_prompt_edit = prompt
+            self.nano_banana_aspect_combo = aspect
+            self.nano_banana_resolution_combo = resolution
+            self.nano_banana_format_combo = output_format
+            self.nano_banana_sync_check = sync
+            self.nano_banana_base64_check = base64_output
+        else:
+            expansion = QCheckBox("Expandir prompt")
+            expansion.setChecked(True)
+            random_seed = QCheckBox("Seed aleatorio (-1)")
+            random_seed.setChecked(True)
+            seed = WheelSafeSpinBox()
+            seed.setRange(0, 2_147_483_647)
+            seed.setDisabled(True)
+            random_seed.toggled.connect(seed.setDisabled)
+            options.addWidget(expansion, 2, 0, 1, 2)
+            options.addWidget(random_seed, 3, 0)
+            options.addWidget(seed, 3, 1)
+            controls.update({"expansion": expansion, "random_seed": random_seed, "seed": seed})
+            self.qwen_image_images = images
+            self.qwen_image_prompt_edit = prompt
+            self.qwen_image_aspect_combo = aspect
+            self.qwen_image_resolution_combo = resolution
+            self.qwen_image_prompt_expansion_check = expansion
+            self.qwen_image_random_seed_check = random_seed
+            self.qwen_image_seed_spin = seed
+        layout.addLayout(options)
+        output = QHBoxLayout()
+        output_edit = QLineEdit(str(data_dir() / "wavespeed_outputs"))
+        choose = QPushButton("Carpeta")
+        choose.clicked.connect(lambda: self._image_edit_choose_output(key))
+        output.addWidget(QLabel("Salida"))
+        output.addWidget(output_edit)
+        output.addWidget(choose)
+        layout.addLayout(output)
+        actions = QHBoxLayout()
+        price = QLabel("Precio: no estimado")
+        estimate = QPushButton("Estimar precio")
+        estimate.clicked.connect(lambda: self._image_edit_estimate_price(key))
+        generate = QPushButton("Generar imagen")
+        generate.clicked.connect(lambda: self._image_edit_generate(key))
+        actions.addWidget(estimate)
+        actions.addWidget(price)
+        actions.addWidget(generate)
+        layout.addLayout(actions)
+        status = QLabel("Listo.")
+        raw = QTextEdit()
+        raw.setReadOnly(True)
+        layout.addWidget(status)
+        layout.addWidget(raw)
+        layout.addStretch()
+        controls.update({"output": output_edit, "price": price, "generate": generate, "status": status, "raw": raw})
+        self._image_edit_controls[key] = controls
+        return page
+
+    def _image_edit_add_images(self, key: str) -> None:
+        controls = self._image_edit_controls[key]
+        images = controls["images"]
+        selected, _ = QFileDialog.getOpenFileNames(
+            self, "Seleccionar imágenes", filter="Images (*.png *.jpg *.jpeg *.webp *.gif)"
+        )
+        existing = {images.item(index).data(Qt.UserRole) for index in range(images.count())}
+        for name in selected:
+            path = str(Path(name).resolve())
+            if path in existing or images.count() >= controls["maximum"]:
+                continue
+            item = QListWidgetItem(Path(path).name)
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            images.addItem(item)
+            existing.add(path)
+        self._refresh_reference_positions(images)
+
+    def _image_edit_remove_images(self, key: str) -> None:
+        images = self._image_edit_controls[key]["images"]
+        for item in images.selectedItems():
+            images.takeItem(images.row(item))
+        self._refresh_reference_positions(images)
+
+    def _image_edit_move_image(self, key: str, direction: int) -> None:
+        images = self._image_edit_controls[key]["images"]
+        source = images.currentRow()
+        destination = source + direction
+        if source < 0 or not 0 <= destination < images.count():
+            return
+        item = images.takeItem(source)
+        images.insertItem(destination, item)
+        images.setCurrentRow(destination)
+        self._refresh_reference_positions(images)
+
+    def _image_edit_choose_output(self, key: str) -> None:
+        selected = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta de salida")
+        if selected:
+            self._image_edit_controls[key]["output"].setText(selected)
+
+    def _image_edit_snapshot(self, key: str) -> dict:
+        controls = self._image_edit_controls[key]
+        snapshot = {
+            "prompt": controls["prompt"].toPlainText(),
+            "images": [controls["images"].item(index).data(Qt.UserRole) for index in range(controls["images"].count())],
+            "aspect_ratio": controls["aspect"].currentData() or "",
+            "resolution": controls["resolution"].currentText(),
+            "output_dir": controls["output"].text().strip(),
+        }
+        if key == "nano_banana":
+            snapshot.update({"output_format": controls["output_format"].currentText(),
+                             "enable_sync_mode": controls["sync"].isChecked(),
+                             "enable_base64_output": controls["base64"].isChecked()})
+        else:
+            snapshot.update({"enable_prompt_expansion": controls["expansion"].isChecked(),
+                             "seed": -1 if controls["random_seed"].isChecked() else controls["seed"].value()})
+        return snapshot
+
+    @staticmethod
+    def _image_edit_builder(key: str):
+        return build_nano_banana_pro_payload if key == "nano_banana" else build_qwen_image_3_edit_payload
+
+    def _image_edit_upload_and_build(self, key: str, snapshot: dict) -> dict:
+        builder = self._image_edit_builder(key)
+        payload = {name: value for name, value in snapshot.items() if name != "output_dir"}
+        builder(**payload)
+        payload["images"] = []
+        for name in snapshot["images"]:
+            path = Path(name)
+            validate_local_reference_file(path, "reference_images")
+            payload["images"].append(self._wavespeed_upload_cached(path)["download_url"])
+        return builder(**payload)
+
+    def _image_edit_estimate_price(self, key: str) -> None:
+        controls = self._image_edit_controls[key]
+        snapshot = self._image_edit_snapshot(key)
+        controls["price"].setText("Calculando...")
+        self._run_wavespeed_worker(
+            lambda: self.wavespeed.estimate_price(
+                self._image_edit_upload_and_build(key, snapshot), model_id=controls["model_id"]
+            ), f"{key}_price"
+        )
+
+    def _image_edit_generate(self, key: str) -> None:
+        controls = self._image_edit_controls[key]
+        snapshot = self._image_edit_snapshot(key)
+        controls["generate"].setEnabled(False)
+        controls["status"].setText("Preparando generación...")
+
+        def task():
+            payload = self._image_edit_upload_and_build(key, snapshot)
+            prediction = self.wavespeed.submit(payload, model_id=controls["model_id"])
+            if prediction.status not in {"completed", "failed", "cancelled", "timeout", "deleted"}:
+                prediction = self.wavespeed.poll_result(prediction.id)
+            output_format = snapshot.get("output_format", "png")
+            output_file = ""
+            if prediction.status == "completed" and prediction.outputs:
+                output_file = self._wavespeed_save_output(
+                    prediction.outputs[0], snapshot, prediction.id, suffix=f".{output_format}"
+                )
+            self.wavespeed_history.add({
+                "task_id": prediction.id, "model_id": controls["model_id"], "status": prediction.status,
+                "output_file": output_file, "error": prediction.error, "payload": payload,
+                "created_at": prediction.created_at,
+            })
+            return {"prediction": prediction, "output_file": output_file}
+
+        self._run_wavespeed_worker(task, f"{key}_generate")
 
     def _face_swap_tab(self) -> QWidget:
         page = QWidget()
@@ -2409,6 +2637,28 @@ class MainWindow(QMainWindow):
     def _handle_wavespeed_event(self, kind: str, payload) -> None:
         if kind == "status":
             self.wavespeed_status_label.setText(str(payload))
+        elif kind in {"nano_banana_price", "qwen_image_price"}:
+            key = kind.removesuffix("_price")
+            label = self._image_edit_controls[key]["price"]
+            if isinstance(payload, Exception):
+                label.setText(f"Precio: error: {payload}")
+            else:
+                amount = payload.get("discounted_price", payload.get("price", "?"))
+                label.setText(f"Precio estimado: ${amount} USD")
+        elif kind in {"nano_banana_generate", "qwen_image_generate"}:
+            key = kind.removesuffix("_generate")
+            controls = self._image_edit_controls[key]
+            controls["generate"].setEnabled(True)
+            if isinstance(payload, Exception):
+                controls["status"].setText(f"Error: {payload}")
+            else:
+                prediction = payload["prediction"]
+                controls["raw"].setPlainText(json.dumps(prediction.raw, ensure_ascii=False, indent=2))
+                message = f"{prediction.id}: {prediction.status}"
+                if payload.get("output_file"):
+                    message += f" · guardado en {payload['output_file']}"
+                controls["status"].setText(message)
+                self._wavespeed_refresh_history()
         elif kind == "face_swap_generate":
             self.face_swap_generate_button.setEnabled(True)
             if isinstance(payload, Exception):

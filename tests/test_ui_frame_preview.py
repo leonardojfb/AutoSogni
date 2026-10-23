@@ -25,6 +25,8 @@ from app.wavespeed.validation import (
     SEEDANCE_I2V_SPICY_MODEL_ID,
     FLUX_MODEL_ID,
     FACE_SWAP_MODEL_ID,
+    NANO_BANANA_PRO_MODEL_ID,
+    QWEN_IMAGE_3_EDIT_MODEL_ID,
 )
 from app.wavespeed.flux_queue import FluxCampaignStore
 from app.wavespeed.history import WaveSpeedHistoryStore
@@ -440,6 +442,61 @@ def test_seedance_and_flux_tabs_build_model_specific_payloads(tmp_path: Path):
     assert face_swap_payload["image"] == "https://cdn/image.png"
     assert face_swap_payload["face_image"] == "https://cdn/image.png"
     assert "Imágenes" in [window.tabs.tabText(index) for index in range(window.tabs.count())]
+
+
+def test_image_edit_tabs_upload_model_specific_payloads(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    window = MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "sogni-key.txt"),
+        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"),
+    )
+    source = tmp_path / "source.png"
+    source.write_bytes(b"png")
+    window._wavespeed_upload_cached = lambda _path: {"download_url": "https://cdn.test/source.png"}
+
+    nano_item = QListWidgetItem(source.name)
+    nano_item.setData(Qt.UserRole, str(source))
+    window.nano_banana_images.addItem(nano_item)
+    window.nano_banana_prompt_edit.setPlainText("Make it glass")
+    window.nano_banana_aspect_combo.setCurrentText("4:5")
+    window.nano_banana_resolution_combo.setCurrentText("4k")
+    window.nano_banana_format_combo.setCurrentText("jpeg")
+    window.nano_banana_sync_check.setChecked(True)
+    nano_payload = window._image_edit_upload_and_build(
+        "nano_banana", window._image_edit_snapshot("nano_banana")
+    )
+    assert NANO_BANANA_PRO_MODEL_ID == "google/nano-banana-pro/edit"
+    assert nano_payload == {
+        "prompt": "Make it glass", "images": ["https://cdn.test/source.png"],
+        "aspect_ratio": "4:5", "resolution": "4k", "output_format": "jpeg",
+        "enable_sync_mode": True, "enable_base64_output": False,
+    }
+
+    qwen_item = QListWidgetItem(source.name)
+    qwen_item.setData(Qt.UserRole, str(source))
+    window.qwen_image_images.addItem(qwen_item)
+    window.qwen_image_prompt_edit.setPlainText("Replace the background")
+    window.qwen_image_aspect_combo.setCurrentText("9:16")
+    window.qwen_image_resolution_combo.setCurrentText("2k")
+    window.qwen_image_prompt_expansion_check.setChecked(False)
+    window.qwen_image_random_seed_check.setChecked(False)
+    window.qwen_image_seed_spin.setValue(42)
+    qwen_payload = window._image_edit_upload_and_build(
+        "qwen_image", window._image_edit_snapshot("qwen_image")
+    )
+    assert QWEN_IMAGE_3_EDIT_MODEL_ID == "alibaba/qwen-image-3.0/edit"
+    assert qwen_payload == {
+        "prompt": "Replace the background", "images": ["https://cdn.test/source.png"],
+        "aspect_ratio": "9:16", "resolution": "2k",
+        "enable_prompt_expansion": False, "seed": 42,
+    }
+    assert {window.image_tabs.tabText(index) for index in range(window.image_tabs.count())} >= {
+        "Face Swap", "Flux Edit", "Nano Banana Pro", "Qwen Image 3.0 Edit",
+    }
 
 
 def test_flux_reference_images_can_be_reordered(tmp_path: Path):
