@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 
 import httpx
@@ -11,10 +12,14 @@ from app.wavespeed.validation import (
     SEEDANCE_I2V_SPICY_MODEL_ID,
     FLUX_MODEL_ID,
     FACE_SWAP_MODEL_ID,
+    NANO_BANANA_PRO_MODEL_ID,
+    QWEN_IMAGE_3_EDIT_MODEL_ID,
     build_seedance_payload,
     build_seedance_i2v_spicy_payload,
     build_flux_payload,
     build_face_swap_payload,
+    build_nano_banana_pro_payload,
+    build_qwen_image_3_edit_payload,
     build_reference_video_payload,
     validate_local_reference_file,
     validate_request,
@@ -92,6 +97,43 @@ def test_face_swap_requires_base_and_identity_images():
         build_face_swap_payload(image="", face_image="https://cdn/identity.png")
 
 
+def test_nano_banana_pro_uses_its_documented_edit_controls():
+    payload = build_nano_banana_pro_payload(
+        prompt="Make the product glass",
+        images=["https://cdn/image.png"],
+        aspect_ratio="4:5",
+        resolution="4k",
+        output_format="jpeg",
+        enable_sync_mode=True,
+        enable_base64_output=True,
+    )
+    assert payload == {
+        "prompt": "Make the product glass", "images": ["https://cdn/image.png"],
+        "aspect_ratio": "4:5", "resolution": "4k", "output_format": "jpeg",
+        "enable_sync_mode": True, "enable_base64_output": True,
+    }
+    with pytest.raises(ValueError, match="1 to 14"):
+        build_nano_banana_pro_payload(prompt="Edit", images=[])
+    with pytest.raises(ValueError, match="output format"):
+        build_nano_banana_pro_payload(prompt="Edit", images=["https://cdn/image.png"], output_format="webp")
+
+
+def test_qwen_image_3_edit_uses_only_its_documented_edit_controls():
+    payload = build_qwen_image_3_edit_payload(
+        prompt="Replace the background", images=["https://cdn/image.png"],
+        resolution="2k", aspect_ratio="9:16", enable_prompt_expansion=True, seed=42,
+    )
+    assert payload == {
+        "prompt": "Replace the background", "images": ["https://cdn/image.png"],
+        "resolution": "2k", "aspect_ratio": "9:16",
+        "enable_prompt_expansion": True, "seed": 42,
+    }
+    with pytest.raises(ValueError, match="1 to 3"):
+        build_qwen_image_3_edit_payload(prompt="Edit", images=["one", "two", "three", "four"])
+    with pytest.raises(ValueError, match="seed"):
+        build_qwen_image_3_edit_payload(prompt="Edit", images=["one"], seed=-2)
+
+
 @pytest.mark.parametrize("model_id,payload", [
     (SEEDANCE_MODEL_ID, {"prompt": "Scene", "duration": 5, "resolution": "720p",
                          "aspect_ratio": "16:9", "enable_web_search": False, "generate_audio": True,
@@ -105,6 +147,11 @@ def test_face_swap_requires_base_and_identity_images():
     (FACE_SWAP_MODEL_ID, {"image": "https://cdn/target.png", "face_image": "https://cdn/identity.png",
                           "target_index": 0, "target_gender": "female", "output_format": "png",
                           "enable_sync_mode": False, "enable_base64_output": False}),
+    (NANO_BANANA_PRO_MODEL_ID, {"prompt": "Edit", "images": ["https://cdn/image.png"],
+                                "resolution": "1k", "output_format": "png",
+                                "enable_sync_mode": False, "enable_base64_output": False}),
+    (QWEN_IMAGE_3_EDIT_MODEL_ID, {"prompt": "Edit", "images": ["https://cdn/image.png"],
+                                  "resolution": "1k", "enable_prompt_expansion": False, "seed": -1}),
 ])
 def test_client_uses_selected_model_for_submit_and_price(model_id, payload):
     seen = []
@@ -257,6 +304,28 @@ def test_history_store_persists_safe_request_metadata_without_remote_upload_urls
     assert len(rows) == 1
     assert rows[0]["task_id"] == "pred-1"
     assert rows[0]["payload"]["reference_images"] == ["<remote-url>"]
+
+
+def test_history_store_preserves_concurrent_records(tmp_path: Path):
+    store = WaveSpeedHistoryStore(tmp_path / "history.json")
+    start = threading.Barrier(8)
+    failures = []
+
+    def add_record(index: int) -> None:
+        try:
+            start.wait()
+            store.add({"task_id": f"pred-{index}", "status": "completed", "payload": {}})
+        except Exception as exc:
+            failures.append(exc)
+
+    workers = [threading.Thread(target=add_record, args=(index,)) for index in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert failures == []
+    assert {row["task_id"] for row in store.list()} == {f"pred-{index}" for index in range(8)}
 
 
 def test_local_video_reference_validation_matches_model_constraints(tmp_path: Path):

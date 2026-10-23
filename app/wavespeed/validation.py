@@ -9,8 +9,11 @@ SEEDANCE_MODEL_ID = "bytedance/seedance-2.0/text-to-video"
 SEEDANCE_I2V_SPICY_MODEL_ID = "bytedance/seedance-2.0/image-to-video-spicy"
 FLUX_MODEL_ID = "wavespeed-ai/flux-2-klein-9b/edit"
 FACE_SWAP_MODEL_ID = "wavespeed-ai/image-face-swap"
+NANO_BANANA_PRO_MODEL_ID = "google/nano-banana-pro/edit"
+QWEN_IMAGE_3_EDIT_MODEL_ID = "alibaba/qwen-image-3.0/edit"
 RESOLUTIONS = ("480p", "720p", "1080p")
 ASPECT_RATIOS = ("16:9", "9:16", "1:1", "4:3", "3:4")
+IMAGE_EDIT_ASPECT_RATIOS = ("1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9")
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "timeout", "deleted"})
 VIDEO_MAX_BYTES = 100 * 1024 * 1024
 
@@ -246,3 +249,53 @@ def build_face_swap_payload(*, image: str, face_image: str, target_index: int = 
         "enable_sync_mode": bool(enable_sync_mode),
         "enable_base64_output": bool(enable_base64_output),
     }
+
+
+def build_nano_banana_pro_payload(*, prompt: str, images: list[str], aspect_ratio: str = "",
+                                  resolution: str = "1k", output_format: str = "png",
+                                  enable_sync_mode: bool = False,
+                                  enable_base64_output: bool = False) -> dict[str, Any]:
+    if not prompt.strip():
+        raise ValueError("Nano Banana Pro requires a prompt.")
+    if not 1 <= len(images) <= 14:
+        raise ValueError("Nano Banana Pro requires 1 to 14 images.")
+    if aspect_ratio and aspect_ratio not in IMAGE_EDIT_ASPECT_RATIOS:
+        raise ValueError(f"Nano Banana Pro aspect ratio must be one of: {', '.join(IMAGE_EDIT_ASPECT_RATIOS)}.")
+    if resolution not in {"1k", "2k", "4k"}:
+        raise ValueError("Nano Banana Pro resolution must be 1k, 2k, or 4k.")
+    if output_format not in {"png", "jpeg"}:
+        raise ValueError("Nano Banana Pro output format must be png or jpeg.")
+    payload: dict[str, Any] = {
+        "prompt": prompt.strip(), "images": list(images), "resolution": resolution,
+        "output_format": output_format, "enable_sync_mode": bool(enable_sync_mode),
+        "enable_base64_output": bool(enable_base64_output),
+    }
+    if aspect_ratio:
+        payload["aspect_ratio"] = aspect_ratio
+    return payload
+
+
+def build_qwen_image_3_edit_payload(*, prompt: str, images: list[str], resolution: str = "1k",
+                                    aspect_ratio: str = "", enable_prompt_expansion: bool = True,
+                                    seed: int = -1) -> dict[str, Any]:
+    if not prompt.strip():
+        raise ValueError("Qwen Image 3.0 Edit requires a prompt.")
+    if not 1 <= len(images) <= 3:
+        raise ValueError("Qwen Image 3.0 Edit requires 1 to 3 images.")
+    if resolution not in {"1k", "2k"}:
+        raise ValueError("Qwen Image 3.0 Edit resolution must be 1k or 2k.")
+    if aspect_ratio and aspect_ratio not in IMAGE_EDIT_ASPECT_RATIOS:
+        raise ValueError(f"Qwen Image 3.0 Edit aspect ratio must be one of: {', '.join(IMAGE_EDIT_ASPECT_RATIOS)}.")
+    try:
+        seed = int(seed)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Qwen Image 3.0 Edit seed must be -1 or an integer from 0 to 2147483647.") from exc
+    if seed != -1 and not 0 <= seed <= 2_147_483_647:
+        raise ValueError("Qwen Image 3.0 Edit seed must be -1 or an integer from 0 to 2147483647.")
+    payload: dict[str, Any] = {
+        "prompt": prompt.strip(), "images": list(images), "resolution": resolution,
+        "enable_prompt_expansion": bool(enable_prompt_expansion), "seed": seed,
+    }
+    if aspect_ratio:
+        payload["aspect_ratio"] = aspect_ratio
+    return payload
