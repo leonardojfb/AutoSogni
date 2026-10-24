@@ -39,6 +39,11 @@ from app.wavespeed.queue import (
 from app.wavespeed.queue_runner import WaveSpeedQueueRunner
 from app.ui.wavespeed_queue import WaveSpeedQueueWidget
 from app.ui.flux_queue import FluxQueueWidget
+from app.ui.image_edit_queue import ImageEditQueueWidget
+from app.wavespeed.image_edit_queue import (
+    ImageEditCampaign, ImageEditCampaignStore, ImageEditQueue,
+    ImageEditQueueConfig, ImageEditQueueItem, ImageEditQueueRunner,
+)
 from app.wavespeed.validation import (
     ASPECT_RATIOS as WAVESPEED_ASPECT_RATIOS,
     RESOLUTIONS as WAVESPEED_RESOLUTIONS,
@@ -109,6 +114,7 @@ class MainWindow(QMainWindow):
         wavespeed_campaign_store=None,
         wavespeed_queue_store=None,
         flux_campaign_store=None,
+        qwen_image_campaign_store=None,
         byteplus_client=None,
         byteplus_key_store=None,
         byteplus_campaign_store=None,
@@ -123,6 +129,19 @@ class MainWindow(QMainWindow):
         self.wavespeed_queue_store = wavespeed_queue_store or WaveSpeedQueueStore()
         self.wavespeed_campaign_store = wavespeed_campaign_store or WaveSpeedCampaignStore()
         self.flux_campaign_store = flux_campaign_store or FluxCampaignStore()
+        self.image_edit_queue_configs = {
+            "qwen_image": ImageEditQueueConfig(
+                "qwen_image", QWEN_IMAGE_3_EDIT_MODEL_ID, build_qwen_image_3_edit_payload,
+                "qwen_image_campaigns.json", 3,
+            ),
+        }
+        self.qwen_image_campaign_store = qwen_image_campaign_store or ImageEditCampaignStore(
+            data_dir() / "qwen_image_campaigns.json")
+        self._qwen_campaign_id = None
+        self._qwen_campaign_name = "Nueva campaña Qwen"
+        self._qwen_queue_running = False
+        self._qwen_queue_active = None
+        self._qwen_campaign_lock = threading.Lock()
         self.byteplus_key_store = byteplus_key_store or ApiKeyStore(data_dir() / "byteplus_api_key.txt")
         self.byteplus = byteplus_client or BytePlusClient(self.byteplus_key_store.get())
         self.byteplus_history = BytePlusHistoryStore()
@@ -946,6 +965,10 @@ class MainWindow(QMainWindow):
         actions.addWidget(estimate)
         actions.addWidget(price)
         actions.addWidget(generate)
+        if key == "qwen_image":
+            enqueue = QPushButton("Agregar a la cola")
+            enqueue.clicked.connect(lambda: self._image_edit_add_current_to_queue("qwen_image"))
+            actions.addWidget(enqueue)
         layout.addLayout(actions)
         status = QLabel("Listo.")
         raw = QTextEdit()
@@ -954,6 +977,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(raw)
         layout.addStretch()
         controls.update({"output": output_edit, "price": price, "generate": generate, "status": status, "raw": raw})
+        if key == "qwen_image":
+            queue_widget = ImageEditQueueWidget("Nueva campaña Qwen", "Opciones Qwen")
+            queue_widget.queue_changed.connect(self._save_qwen_queue)
+            queue_widget.start_requested.connect(self._start_qwen_queue)
+            queue_widget.pause_requested.connect(self._pause_qwen_queue)
+            queue_widget.retry_requested.connect(self._retry_qwen_item)
+            queue_widget.retry_failed_requested.connect(self._retry_qwen_failed)
+            queue_widget.clear_completed_requested.connect(self._clear_qwen_completed)
+            queue_widget.estimate_requested.connect(self._estimate_qwen_prices)
+            controls.update({"queue": queue_widget, "enqueue": enqueue})
+            layout.addWidget(queue_widget)
+            self.qwen_image_queue_widget = queue_widget
+            self._load_qwen_campaigns()
         self._image_edit_controls[key] = controls
         return page
 
@@ -1065,6 +1101,120 @@ class MainWindow(QMainWindow):
             return {"prediction": prediction, "output_file": output_file}
 
         self._run_wavespeed_worker(task, f"{key}_generate")
+
+    def _load_qwen_campaigns(self) -> None:
+        campaigns, active_id = self.qwen_image_campaign_store.load()
+        self.qwen_image_queue_widget.set_campaigns(campaigns, active_id)
+        campaign = next((item for item in campaigns if item.campaign_id == active_id), None)
+        if campaign:
+            self._qwen_campaign_id, self._qwen_campaign_name = campaign.campaign_id, campaign.name
+            self.qwen_image_queue_widget.campaign_name_edit.setText(campaign.name)
+            self.qwen_image_queue_widget.load_queue(campaign.queue)
+
+    def _save_qwen_queue(self) -> bool:
+        if self._qwen_queue_running:
+            return False
+        queue = self.qwen_image_queue_widget.queue()
+        campaign = ImageEditCampaign(campaign_id=self._qwen_campaign_id or ImageEditCampaign().campaign_id,
+                                     name=self.qwen_image_queue_widget.campaign_name_edit.text().strip() or "Nueva campaña Qwen",
+                                     queue=queue)
+        self.qwen_image_campaign_store.save(campaign, active=True)
+        self._qwen_campaign_id, self._qwen_campaign_name = campaign.campaign_id, campaign.name
+        return True
+
+    def _persist_qwen_queue(self, queue: ImageEditQueue) -> None:
+        if not self._qwen_campaign_id:
+            return
+        with self._qwen_campaign_lock:
+            self.qwen_image_campaign_store.save(ImageEditCampaign(campaign_id=self._qwen_campaign_id,
+                                                name=self._qwen_campaign_name, queue=queue), active=True)
+
+    def _image_edit_add_current_to_queue(self, key: str) -> None:
+        if key != "qwen_image" or self._qwen_queue_running:
+            return
+        snapshot = self._image_edit_snapshot(key)
+        try:
+            build_qwen_image_3_edit_payload(**{name: snapshot[name] for name in (
+                "prompt", "images", "aspect_ratio", "resolution", "enable_prompt_expansion", "seed")})
+            for name in snapshot["images"]:
+                validate_local_reference_file(Path(name), "reference_images")
+        except Exception as exc:
+            self.qwen_image_queue_widget.status_label.setText(f"Error: {exc}")
+            return
+        queue = self.qwen_image_queue_widget.queue()
+        queue.items.append(ImageEditQueueItem(image_paths=list(snapshot["images"]), prompt=snapshot["prompt"],
+            settings={name: snapshot[name] for name in ("aspect_ratio", "resolution", "enable_prompt_expansion", "seed")}))
+        queue.output_dir = snapshot["output_dir"]
+        self.qwen_image_queue_widget.load_queue(queue)
+        if self._save_qwen_queue():
+            self.qwen_image_queue_widget.status_label.setText(f"{len(queue.items)} ítem(s) en cola.")
+
+    def _start_qwen_queue(self) -> None:
+        if self._qwen_queue_running:
+            return
+        queue = self.qwen_image_queue_widget.queue()
+        if not queue.items:
+            self.qwen_image_queue_widget.status_label.setText("Error: Agregá al menos una edición a la cola.")
+            return
+        if not self._save_qwen_queue():
+            return
+        queue.paused = False; self._persist_qwen_queue(queue)
+        self._qwen_queue_running, self._qwen_queue_active = True, queue
+        self.qwen_image_queue_widget.set_running(True)
+        threading.Thread(target=self._run_qwen_queue, args=(queue,), daemon=True).start()
+
+    def _run_qwen_queue(self, queue: ImageEditQueue) -> None:
+        error = None
+        try:
+            ImageEditQueueRunner(self.image_edit_queue_configs["qwen_image"], self.wavespeed,
+                upload_file=self._wavespeed_upload_cached,
+                save_output=lambda output, output_dir, task_id: self._wavespeed_save_output(
+                    output, {"output_dir": output_dir}, task_id, suffix=".png"),
+                on_update=lambda item: self._qwen_item_update(queue, item)).run(queue)
+        except Exception as exc:
+            error = exc
+        finally:
+            self._persist_qwen_queue(queue)
+            self._post_wavespeed_event("qwen_queue_finished", error)
+
+    def _qwen_item_update(self, queue: ImageEditQueue, item: ImageEditQueueItem) -> None:
+        self._persist_qwen_queue(queue)
+        if item.task_id and item.status in {QueueStatus.COMPLETED, QueueStatus.FAILED}:
+            self.wavespeed_history.add({"task_id": item.task_id, "model_id": QWEN_IMAGE_3_EDIT_MODEL_ID,
+                "status": item.status, "output_file": item.output_file, "error": item.error,
+                "payload": {"prompt": item.prompt, "image_paths": item.image_paths, **item.settings},
+                "created_at": item.created_at})
+        self._post_wavespeed_event("qwen_queue_item", item)
+
+    def _pause_qwen_queue(self) -> None:
+        if self._qwen_queue_active:
+            self._qwen_queue_active.paused = True; self._persist_qwen_queue(self._qwen_queue_active)
+
+    def _retry_qwen_item(self, item_id: str) -> None:
+        queue = self.qwen_image_queue_widget.queue()
+        item = next((row for row in queue.items if row.item_id == item_id), None)
+        if item and not self._qwen_queue_running:
+            item.retry(); self._start_qwen_queue()
+
+    def _retry_qwen_failed(self) -> None:
+        if not self._qwen_queue_running:
+            for item in self.qwen_image_queue_widget.queue().items:
+                if item.status == QueueStatus.FAILED: item.retry()
+            self._start_qwen_queue()
+
+    def _clear_qwen_completed(self) -> None:
+        if not self._qwen_queue_running:
+            queue = self.qwen_image_queue_widget.queue()
+            queue.items = [item for item in queue.items if item.status != QueueStatus.COMPLETED]
+            self.qwen_image_queue_widget.load_queue(queue); self._save_qwen_queue()
+
+    def _estimate_qwen_prices(self) -> None:
+        queue = self.qwen_image_queue_widget.queue()
+        def task():
+            return ImageEditQueueRunner(self.image_edit_queue_configs["qwen_image"], self.wavespeed,
+                upload_file=self._wavespeed_upload_cached, save_output=lambda *_: "",
+                on_update=lambda item: self._qwen_item_update(queue, item)).estimate_prices(queue)
+        self._run_wavespeed_worker(task, "qwen_queue_prices")
 
     def _face_swap_tab(self) -> QWidget:
         page = QWidget()
@@ -2715,6 +2865,20 @@ class MainWindow(QMainWindow):
                     message += f" · guardado en {payload['output_file']}"
                 controls["status"].setText(message)
                 self._wavespeed_refresh_history()
+        elif kind == "qwen_queue_item":
+            self.qwen_image_queue_widget.set_item_update(payload)
+            if payload.status in {QueueStatus.COMPLETED, QueueStatus.FAILED}:
+                self._wavespeed_refresh_history()
+        elif kind == "qwen_queue_prices":
+            if isinstance(payload, Exception):
+                self.qwen_image_queue_widget.set_total_price(None, str(payload))
+            else:
+                self.qwen_image_queue_widget.set_total_price(float(payload))
+        elif kind == "qwen_queue_finished":
+            self._qwen_queue_running, self._qwen_queue_active = False, None
+            self.qwen_image_queue_widget.set_running(False)
+            self.qwen_image_queue_widget.status_label.setText(
+                f"Error: {payload}" if isinstance(payload, Exception) else "Cola Qwen finalizada.")
         elif kind == "face_swap_generate":
             self.face_swap_generate_button.setEnabled(True)
             if isinstance(payload, Exception):
