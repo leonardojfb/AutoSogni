@@ -12,6 +12,8 @@ from app.sogni.auth import ApiKeyStore
 from app.sogni.client import SogniClient
 from app.sogni.schemas import ModelDescriptor
 from app.ui.main_window import MainWindow
+from app.ui.image_edit_queue import ImageEditQueueWidget
+from app.wavespeed.image_edit_queue import ImageEditQueue, ImageEditQueueItem
 from app.wavespeed.queue import (
     QueueStatus,
     WaveSpeedCampaign,
@@ -35,6 +37,25 @@ from app.wavespeed.schemas import WaveSpeedPrediction
 
 def _app():
     return QApplication.instance() or QApplication([])
+
+
+def test_image_edit_queue_widget_exposes_batch_controls_and_result_rows():
+    _app()
+    widget = ImageEditQueueWidget("Nueva campaña", "Opciones Qwen")
+    widget.set_limits(4)
+    widget.repetition_spin.setValue(2)
+    widget.concurrency_spin.setValue(3)
+    item = ImageEditQueueItem(
+        image_paths=["C:/source.png"], prompt="edit", model_key="qwen_image",
+        model_id=QWEN_IMAGE_3_EDIT_MODEL_ID, repetition=2,
+        settings={"resolution": "1k", "aspect_ratio": "", "enable_prompt_expansion": True, "seed": -1},
+    )
+    widget.load_queue(ImageEditQueue(concurrency=3, items=[item]))
+
+    assert widget.repetitions() == 2
+    assert widget.queue().concurrency == 3
+    assert widget.table.item(0, widget.REPETITION_COLUMN).text() == "2"
+    assert widget.table.item(0, widget.MODEL_COLUMN).text() == QWEN_IMAGE_3_EDIT_MODEL_ID
 
 
 def test_use_campaign_as_base_loads_selected_editable_copy(tmp_path: Path):
