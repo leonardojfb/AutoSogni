@@ -387,6 +387,15 @@
       persisted, _ = window.image_edit_campaign_stores["qwen_image"].load()
       assert len(persisted[0].queue.items) == 12
 
+  def test_qwen_batch_picker_keeps_six_independent_sources(tmp_path: Path, monkeypatch):
+      window = make_main_window(tmp_path)
+      sources = create_image_paths(tmp_path, count=6)
+      monkeypatch.setattr(QFileDialog, "getOpenFileNames", lambda *args, **kwargs: (sources, ""))
+
+      window._image_edit_add_images("qwen_image")
+
+      assert window.qwen_image_images.count() == 6
+
   @pytest.mark.parametrize("key", ["flux", "qwen_image", "nano_banana"])
   def test_each_image_model_exposes_the_same_queue_actions(tmp_path: Path, key: str):
       window = make_main_window(tmp_path)
@@ -412,6 +421,8 @@
   For Flux startup only, if the new Flux queue file has no campaign, call the read-only legacy converter from Task 2 and display converted campaigns. Do not save or delete through `FluxCampaignStore`; the first explicit queue save writes the new file only.
 
   In each image tab (including Flux), add the shared queue widget, bind signals with the model key, and add `Agregar a la cola`. Replace the direct-generation action with `_enqueue_image_edit_batch(key)` followed by `_start_image_edit_queue(key)` only when the user chose the one-click generate button. This ensures even a one-image generation uses durable queue state.
+
+  Change `_image_edit_add_images` so its selection cap is a batch cap (at least 100 source files) rather than the model's per-request image cap. The adapters still validate each newly expanded record with exactly one `images` entry, so Qwen never sends more than its provider maximum of three references in a request. Preserve duplicate-path prevention and the existing add/remove/reorder behavior.
 
   The enqueue method must take the controls' `snapshot`, separate `output_dir`, call `expand_image_edit_batch(config, snapshot["images"], repetitions=widget.repetitions(), prompt=snapshot["prompt"], settings=model_settings)`, append all returned items before one `save`, set `queue.output_dir`, and report `"12 ítem(s) agregados a la cola."` for six images/two repetitions. Never append a partial subset after validation failure.
 
