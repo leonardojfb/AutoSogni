@@ -42,7 +42,7 @@ from app.ui.flux_queue import FluxQueueWidget
 from app.ui.image_edit_queue import ImageEditQueueWidget
 from app.wavespeed.image_edit_queue import (
     ImageEditCampaign, ImageEditCampaignStore, ImageEditQueue,
-    ImageEditQueueConfig, ImageEditQueueItem, ImageEditQueueRunner,
+    ImageEditQueueConfig, ImageEditQueueItem, ImageEditQueueRunner, expand_image_edit_batch,
 )
 from app.wavespeed.validation import (
     ASPECT_RATIOS as WAVESPEED_ASPECT_RATIOS,
@@ -1134,20 +1134,22 @@ class MainWindow(QMainWindow):
             return
         snapshot = self._image_edit_snapshot(key)
         try:
-            build_qwen_image_3_edit_payload(**{name: snapshot[name] for name in (
-                "prompt", "images", "aspect_ratio", "resolution", "enable_prompt_expansion", "seed")})
-            for name in snapshot["images"]:
-                validate_local_reference_file(Path(name), "reference_images")
+            settings = {name: snapshot[name] for name in (
+                "aspect_ratio", "resolution", "enable_prompt_expansion", "seed")}
+            items = expand_image_edit_batch(
+                self.image_edit_queue_configs[key], snapshot["images"],
+                repetitions=self.qwen_image_queue_widget.repetitions(),
+                prompt=snapshot["prompt"], settings=settings,
+            )
         except Exception as exc:
             self.qwen_image_queue_widget.status_label.setText(f"Error: {exc}")
             return
         queue = self.qwen_image_queue_widget.queue()
-        queue.items.append(ImageEditQueueItem(image_paths=list(snapshot["images"]), prompt=snapshot["prompt"],
-            settings={name: snapshot[name] for name in ("aspect_ratio", "resolution", "enable_prompt_expansion", "seed")}))
+        queue.items.extend(items)
         queue.output_dir = snapshot["output_dir"]
         self.qwen_image_queue_widget.load_queue(queue)
         if self._save_qwen_queue():
-            self.qwen_image_queue_widget.status_label.setText(f"{len(queue.items)} ítem(s) en cola.")
+            self.qwen_image_queue_widget.status_label.setText(f"{len(items)} ítem(s) agregados a la cola.")
 
     def _start_qwen_queue(self) -> None:
         if self._qwen_queue_running:

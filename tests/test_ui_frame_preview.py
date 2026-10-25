@@ -520,6 +520,37 @@ def test_image_edit_tabs_upload_model_specific_payloads(tmp_path: Path):
     }
 
 
+def test_qwen_batch_enqueue_persists_twelve_independent_tasks(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    from app.wavespeed.image_edit_queue import ImageEditCampaignStore
+    store = ImageEditCampaignStore(tmp_path / "qwen_campaigns.json")
+    window = MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "sogni-key.txt"),
+        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"),
+        qwen_image_campaign_store=store,
+    )
+    for index in range(6):
+        source = tmp_path / f"source-{index}.png"
+        source.write_bytes(b"png")
+        item = QListWidgetItem(source.name)
+        item.setData(Qt.UserRole, str(source))
+        window.qwen_image_images.addItem(item)
+    window.qwen_image_prompt_edit.setPlainText("Replace background")
+    window.qwen_image_queue_widget.repetition_spin.setValue(2)
+
+    window._image_edit_add_current_to_queue("qwen_image")
+
+    queue = window.qwen_image_queue_widget.queue()
+    assert len(queue.items) == 12
+    assert [item.image_paths[0] for item in queue.items].count(str(tmp_path / "source-0.png")) == 2
+    persisted, _ = store.load()
+    assert len(persisted[0].queue.items) == 12
+
+
 def test_flux_reference_images_can_be_reordered(tmp_path: Path):
     _app()
     db = Database(tmp_path / "app.db")
