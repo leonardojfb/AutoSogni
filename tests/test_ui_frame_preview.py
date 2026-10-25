@@ -12,6 +12,8 @@ from app.sogni.auth import ApiKeyStore
 from app.sogni.client import SogniClient
 from app.sogni.schemas import ModelDescriptor
 from app.ui.main_window import MainWindow
+from app.ui.image_edit_queue import ImageEditQueueWidget
+from app.wavespeed.image_edit_queue import ImageEditQueue, ImageEditQueueItem
 from app.wavespeed.queue import (
     QueueStatus,
     WaveSpeedCampaign,
@@ -35,6 +37,25 @@ from app.wavespeed.schemas import WaveSpeedPrediction
 
 def _app():
     return QApplication.instance() or QApplication([])
+
+
+def test_image_edit_queue_widget_exposes_batch_controls_and_result_rows():
+    _app()
+    widget = ImageEditQueueWidget("Nueva campaña", "Opciones Qwen")
+    widget.set_limits(4)
+    widget.repetition_spin.setValue(2)
+    widget.concurrency_spin.setValue(3)
+    item = ImageEditQueueItem(
+        image_paths=["C:/source.png"], prompt="edit", model_key="qwen_image",
+        model_id=QWEN_IMAGE_3_EDIT_MODEL_ID, repetition=2,
+        settings={"resolution": "1k", "aspect_ratio": "", "enable_prompt_expansion": True, "seed": -1},
+    )
+    widget.load_queue(ImageEditQueue(concurrency=3, items=[item]))
+
+    assert widget.repetitions() == 2
+    assert widget.queue().concurrency == 3
+    assert widget.table.item(0, widget.REPETITION_COLUMN).text() == "2"
+    assert widget.table.item(0, widget.MODEL_COLUMN).text() == QWEN_IMAGE_3_EDIT_MODEL_ID
 
 
 def test_use_campaign_as_base_loads_selected_editable_copy(tmp_path: Path):
@@ -426,6 +447,11 @@ def test_seedance_and_flux_tabs_build_model_specific_payloads(tmp_path: Path):
     entry = QListWidgetItem(image.name)
     entry.setData(Qt.UserRole, str(image))
     window.flux_images.addItem(entry)
+    from app.wavespeed.image_edit_queue import ImageEditCampaignStore
+    unified_store = ImageEditCampaignStore(tmp_path / "flux_image_edit_campaigns.json")
+    window.image_edit_campaign_stores["flux"] = unified_store
+    window._image_edit_states["flux"]["campaign_id"] = None
+    window.flux_queue_widget.load_queue(ImageEditQueue())
     window.flux_prompt_edit.setPlainText("Flux prompt")
     window._wavespeed_upload_cached = lambda _path: {"download_url": "https://cdn/image.png"}
     flux_payload = window._flux_upload_and_build(window._flux_snapshot())
@@ -499,6 +525,37 @@ def test_image_edit_tabs_upload_model_specific_payloads(tmp_path: Path):
     }
 
 
+def test_qwen_batch_enqueue_persists_twelve_independent_tasks(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    from app.wavespeed.image_edit_queue import ImageEditCampaignStore
+    store = ImageEditCampaignStore(tmp_path / "qwen_campaigns.json")
+    window = MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "sogni-key.txt"),
+        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"),
+        qwen_image_campaign_store=store,
+    )
+    for index in range(6):
+        source = tmp_path / f"source-{index}.png"
+        source.write_bytes(b"png")
+        item = QListWidgetItem(source.name)
+        item.setData(Qt.UserRole, str(source))
+        window.qwen_image_images.addItem(item)
+    window.qwen_image_prompt_edit.setPlainText("Replace background")
+    window.qwen_image_queue_widget.repetition_spin.setValue(2)
+
+    window._image_edit_add_current_to_queue("qwen_image")
+
+    queue = window.qwen_image_queue_widget.queue()
+    assert len(queue.items) == 12
+    assert [item.image_paths[0] for item in queue.items].count(str(tmp_path / "source-0.png")) == 2
+    persisted, _ = store.load()
+    assert len(persisted[0].queue.items) == 12
+
+
 def test_flux_reference_images_can_be_reordered(tmp_path: Path):
     _app()
     db = Database(tmp_path / "app.db")
@@ -538,6 +595,11 @@ def test_flux_add_to_queue_persists_snapshot_in_its_own_campaign(tmp_path: Path)
         flux_campaign_store=store,
     )
     video_campaign_bytes = (tmp_path / "wavespeed_campaigns.json").read_bytes()
+    from app.wavespeed.image_edit_queue import ImageEditCampaignStore
+    unified_store = ImageEditCampaignStore(tmp_path / "flux_image_edit_campaigns.json")
+    window.image_edit_campaign_stores["flux"] = unified_store
+    window._image_edit_states["flux"]["campaign_id"] = None
+    window.flux_queue_widget.load_queue(ImageEditQueue())
     image = tmp_path / "source.png"
     image.write_bytes(b"png")
     entry = QListWidgetItem(image.name)
@@ -548,18 +610,13 @@ def test_flux_add_to_queue_persists_snapshot_in_its_own_campaign(tmp_path: Path)
     window._flux_add_current_to_queue()
     window.flux_prompt_edit.setPlainText("Changed later")
 
-    campaigns, active_id = store.load()
+    campaigns, active_id = unified_store.load()
     assert active_id == campaigns[0].campaign_id
     assert len(campaigns[0].queue.items) == 1
     assert campaigns[0].queue.items[0].prompt == "Keep exact prompt"
     assert campaigns[0].queue.items[0].image_paths == [str(image)]
-    assert campaigns[0].queue.items[0].size == "1024*1024"
-    assert window.flux_queue_widget.queue().items[0].prompt == "Keep exact prompt"
-
-    window._new_flux_campaign()
-    assert len(store.load()[0]) == 2
-    assert window.flux_queue_widget.queue().items == []
-    window._select_flux_campaign(campaigns[0].campaign_id)
+    assert campaigns[0].queue.items[0].settings["size"] == "1024*1024"
+    assert store.load() == ([], None)
     assert window.flux_queue_widget.queue().items[0].prompt == "Keep exact prompt"
     assert (tmp_path / "wavespeed_campaigns.json").read_bytes() == video_campaign_bytes
 
@@ -599,6 +656,11 @@ def test_flux_queue_runs_from_tab_with_fake_client_and_persists_result(tmp_path:
         flux_campaign_store=store,
     )
     window.wavespeed_history = WaveSpeedHistoryStore(tmp_path / "history.json")
+    from app.wavespeed.image_edit_queue import ImageEditCampaignStore
+    unified_store = ImageEditCampaignStore(tmp_path / "flux_image_edit_campaigns.json")
+    window.image_edit_campaign_stores["flux"] = unified_store
+    window._image_edit_states["flux"]["campaign_id"] = None
+    window.flux_queue_widget.load_queue(ImageEditQueue())
     image = tmp_path / "input.png"
     image.write_bytes(b"input")
     entry = QListWidgetItem(image.name)
@@ -607,16 +669,16 @@ def test_flux_queue_runs_from_tab_with_fake_client_and_persists_result(tmp_path:
     window.flux_prompt_edit.setPlainText("Edit me")
     window.flux_output_edit.setText(str(tmp_path / "outputs"))
     window._flux_add_current_to_queue()
-    window._start_flux_queue()
+    window._start_image_edit_queue("flux")
     deadline = time.monotonic() + 5
-    while window._flux_queue_running and time.monotonic() < deadline:
+    while window._image_edit_states["flux"]["running"] and time.monotonic() < deadline:
         app.processEvents()
         time.sleep(0.01)
     app.processEvents()
 
-    assert not window._flux_queue_running
-    item = store.load()[0][0].queue.items[0]
-    assert item.status == QueueStatus.COMPLETED
+    assert not window._image_edit_states["flux"]["running"]
+    item = unified_store.load()[0][0].queue.items[0]
+    assert item.status == QueueStatus.COMPLETED, item.error
     assert item.task_id == "flux-task"
     assert Path(item.output_file).read_bytes() == b"result"
     assert window.wavespeed_history.list()[0]["model_id"] == FLUX_MODEL_ID

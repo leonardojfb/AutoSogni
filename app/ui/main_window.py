@@ -42,7 +42,8 @@ from app.ui.flux_queue import FluxQueueWidget
 from app.ui.image_edit_queue import ImageEditQueueWidget
 from app.wavespeed.image_edit_queue import (
     ImageEditCampaign, ImageEditCampaignStore, ImageEditQueue,
-    ImageEditQueueConfig, ImageEditQueueItem, ImageEditQueueRunner,
+    ImageEditQueueConfig, ImageEditQueueItem, ImageEditQueueRunner, expand_image_edit_batch,
+    load_legacy_flux_campaigns,
 )
 from app.wavespeed.validation import (
     ASPECT_RATIOS as WAVESPEED_ASPECT_RATIOS,
@@ -130,6 +131,10 @@ class MainWindow(QMainWindow):
         self.wavespeed_campaign_store = wavespeed_campaign_store or WaveSpeedCampaignStore()
         self.flux_campaign_store = flux_campaign_store or FluxCampaignStore()
         self.image_edit_queue_configs = {
+            "flux": ImageEditQueueConfig(
+                "flux", FLUX_MODEL_ID, build_flux_payload, "flux_image_edit_campaigns.json", 3,
+                "Flux", ".png", 4,
+            ),
             "qwen_image": ImageEditQueueConfig(
                 "qwen_image", QWEN_IMAGE_3_EDIT_MODEL_ID, build_qwen_image_3_edit_payload,
                 "qwen_image_campaigns.json", 3,
@@ -137,6 +142,22 @@ class MainWindow(QMainWindow):
         }
         self.qwen_image_campaign_store = qwen_image_campaign_store or ImageEditCampaignStore(
             data_dir() / "qwen_image_campaigns.json")
+        self.nano_banana_campaign_store = ImageEditCampaignStore(data_dir() / "nano_banana_campaigns.json")
+        self.image_edit_queue_configs["nano_banana"] = ImageEditQueueConfig(
+            "nano_banana", NANO_BANANA_PRO_MODEL_ID, build_nano_banana_pro_payload,
+            "nano_banana_campaigns.json", 14, "Nano Banana Pro", ".png", 4,
+        )
+        self.image_edit_campaign_stores = {
+            "flux": ImageEditCampaignStore(data_dir() / "flux_image_edit_campaigns.json"),
+            "qwen_image": self.qwen_image_campaign_store,
+            "nano_banana": self.nano_banana_campaign_store,
+        }
+        self.image_edit_queues = {}
+        self._image_edit_states = {
+            key: {"campaign_id": None, "campaign_name": f"Nueva campaña {config.display_name}",
+                  "running": False, "active": None, "lock": threading.Lock()}
+            for key, config in self.image_edit_queue_configs.items()
+        }
         self._qwen_campaign_id = None
         self._qwen_campaign_name = "Nueva campaña Qwen"
         self._qwen_queue_running = False
@@ -965,9 +986,9 @@ class MainWindow(QMainWindow):
         actions.addWidget(estimate)
         actions.addWidget(price)
         actions.addWidget(generate)
-        if key == "qwen_image":
+        if key in self.image_edit_queue_configs:
             enqueue = QPushButton("Agregar a la cola")
-            enqueue.clicked.connect(lambda: self._image_edit_add_current_to_queue("qwen_image"))
+            enqueue.clicked.connect(lambda _checked=False, model_key=key: self._enqueue_image_edit_batch(model_key))
             actions.addWidget(enqueue)
         layout.addLayout(actions)
         status = QLabel("Listo.")
@@ -977,19 +998,22 @@ class MainWindow(QMainWindow):
         layout.addWidget(raw)
         layout.addStretch()
         controls.update({"output": output_edit, "price": price, "generate": generate, "status": status, "raw": raw})
-        if key == "qwen_image":
-            queue_widget = ImageEditQueueWidget("Nueva campaña Qwen", "Opciones Qwen")
-            queue_widget.queue_changed.connect(self._save_qwen_queue)
-            queue_widget.start_requested.connect(self._start_qwen_queue)
-            queue_widget.pause_requested.connect(self._pause_qwen_queue)
-            queue_widget.retry_requested.connect(self._retry_qwen_item)
-            queue_widget.retry_failed_requested.connect(self._retry_qwen_failed)
-            queue_widget.clear_completed_requested.connect(self._clear_qwen_completed)
-            queue_widget.estimate_requested.connect(self._estimate_qwen_prices)
+        if key in self.image_edit_queue_configs:
+            queue_widget = ImageEditQueueWidget(f"Nueva campaña {self.image_edit_queue_configs[key].display_name}",
+                                                 f"Opciones {self.image_edit_queue_configs[key].display_name}")
+            queue_widget.set_limits(self.image_edit_queue_configs[key].max_parallelism)
+            queue_widget.queue_changed.connect(lambda model_key=key: self._save_image_edit_queue(model_key))
+            queue_widget.start_requested.connect(lambda model_key=key: self._start_image_edit_queue(model_key))
+            queue_widget.pause_requested.connect(lambda model_key=key: self._pause_image_edit_queue(model_key))
+            queue_widget.retry_requested.connect(lambda item_id, model_key=key: self._retry_image_edit_item(model_key, item_id))
+            queue_widget.retry_failed_requested.connect(lambda model_key=key: self._retry_image_edit_failed(model_key))
+            queue_widget.clear_completed_requested.connect(lambda model_key=key: self._clear_image_edit_completed(model_key))
+            queue_widget.estimate_requested.connect(lambda model_key=key: self._estimate_image_edit_prices(model_key))
             controls.update({"queue": queue_widget, "enqueue": enqueue})
             layout.addWidget(queue_widget)
-            self.qwen_image_queue_widget = queue_widget
-            self._load_qwen_campaigns()
+            self.image_edit_queues[key] = queue_widget
+            if key == "qwen_image": self.qwen_image_queue_widget = queue_widget
+            self._load_image_edit_campaigns(key)
         self._image_edit_controls[key] = controls
         return page
 
@@ -1002,7 +1026,7 @@ class MainWindow(QMainWindow):
         existing = {images.item(index).data(Qt.UserRole) for index in range(images.count())}
         for name in selected:
             path = str(Path(name).resolve())
-            if path in existing or images.count() >= controls["maximum"]:
+            if path in existing or images.count() >= 100:
                 continue
             item = QListWidgetItem(Path(path).name)
             item.setData(Qt.UserRole, path)
@@ -1134,20 +1158,22 @@ class MainWindow(QMainWindow):
             return
         snapshot = self._image_edit_snapshot(key)
         try:
-            build_qwen_image_3_edit_payload(**{name: snapshot[name] for name in (
-                "prompt", "images", "aspect_ratio", "resolution", "enable_prompt_expansion", "seed")})
-            for name in snapshot["images"]:
-                validate_local_reference_file(Path(name), "reference_images")
+            settings = {name: snapshot[name] for name in (
+                "aspect_ratio", "resolution", "enable_prompt_expansion", "seed")}
+            items = expand_image_edit_batch(
+                self.image_edit_queue_configs[key], snapshot["images"],
+                repetitions=self.qwen_image_queue_widget.repetitions(),
+                prompt=snapshot["prompt"], settings=settings,
+            )
         except Exception as exc:
             self.qwen_image_queue_widget.status_label.setText(f"Error: {exc}")
             return
         queue = self.qwen_image_queue_widget.queue()
-        queue.items.append(ImageEditQueueItem(image_paths=list(snapshot["images"]), prompt=snapshot["prompt"],
-            settings={name: snapshot[name] for name in ("aspect_ratio", "resolution", "enable_prompt_expansion", "seed")}))
+        queue.items.extend(items)
         queue.output_dir = snapshot["output_dir"]
         self.qwen_image_queue_widget.load_queue(queue)
         if self._save_qwen_queue():
-            self.qwen_image_queue_widget.status_label.setText(f"{len(queue.items)} ítem(s) en cola.")
+            self.qwen_image_queue_widget.status_label.setText(f"{len(items)} ítem(s) agregados a la cola.")
 
     def _start_qwen_queue(self) -> None:
         if self._qwen_queue_running:
@@ -1215,6 +1241,96 @@ class MainWindow(QMainWindow):
                 upload_file=self._wavespeed_upload_cached, save_output=lambda *_: "",
                 on_update=lambda item: self._qwen_item_update(queue, item)).estimate_prices(queue)
         self._run_wavespeed_worker(task, "qwen_queue_prices")
+
+    def _load_image_edit_campaigns(self, key: str) -> None:
+        widget, store, state = self.image_edit_queues[key], self.image_edit_campaign_stores[key], self._image_edit_states[key]
+        campaigns, active_id = store.load()
+        if key == "flux" and not campaigns:
+            campaigns, active_id = load_legacy_flux_campaigns(self.flux_campaign_store)
+        widget.set_campaigns(campaigns, active_id)
+        campaign = next((item for item in campaigns if item.campaign_id == active_id), None)
+        if campaign:
+            state["campaign_id"], state["campaign_name"] = campaign.campaign_id, campaign.name
+            widget.campaign_name_edit.setText(campaign.name); widget.load_queue(campaign.queue)
+
+    def _save_image_edit_queue(self, key: str) -> bool:
+        state, widget, store = self._image_edit_states[key], self.image_edit_queues[key], self.image_edit_campaign_stores[key]
+        if state["running"]: return False
+        campaign = ImageEditCampaign(campaign_id=state["campaign_id"] or ImageEditCampaign().campaign_id,
+            name=widget.campaign_name_edit.text().strip() or f"Nueva campaña {self.image_edit_queue_configs[key].display_name}", queue=widget.queue())
+        store.save(campaign, active=True)
+        state["campaign_id"], state["campaign_name"] = campaign.campaign_id, campaign.name
+        widget.set_campaigns(store.load()[0], campaign.campaign_id)
+        return True
+
+    def _persist_image_edit_queue(self, key: str, queue: ImageEditQueue) -> None:
+        state = self._image_edit_states[key]
+        if state["campaign_id"]:
+            with state["lock"]:
+                self.image_edit_campaign_stores[key].save(ImageEditCampaign(campaign_id=state["campaign_id"], name=state["campaign_name"], queue=queue), active=True)
+
+    def _enqueue_image_edit_batch(self, key: str) -> None:
+        state, widget = self._image_edit_states[key], self.image_edit_queues[key]
+        if state["running"]: return
+        snapshot = self._flux_snapshot() if key == "flux" else self._image_edit_snapshot(key)
+        settings = {name: value for name, value in snapshot.items() if name not in {"prompt", "images", "output_dir"}}
+        try:
+            items = expand_image_edit_batch(self.image_edit_queue_configs[key], snapshot["images"],
+                repetitions=widget.repetitions(), prompt=snapshot["prompt"], settings=settings)
+        except Exception as exc:
+            widget.status_label.setText(f"Error: {exc}"); return
+        queue = widget.queue(); queue.items.extend(items); queue.output_dir = snapshot["output_dir"]
+        widget.load_queue(queue)
+        if self._save_image_edit_queue(key): widget.status_label.setText(f"{len(items)} ítem(s) agregados a la cola.")
+
+    def _start_image_edit_queue(self, key: str) -> None:
+        state, widget = self._image_edit_states[key], self.image_edit_queues[key]
+        if state["running"]: return
+        queue = widget.queue()
+        if not queue.items: widget.status_label.setText("Error: Agregá al menos una edición a la cola."); return
+        if not self._save_image_edit_queue(key): return
+        queue.paused = False; self._persist_image_edit_queue(key, queue); state["running"], state["active"] = True, queue; widget.set_running(True)
+        threading.Thread(target=self._run_image_edit_queue, args=(key, queue), daemon=True).start()
+
+    def _run_image_edit_queue(self, key: str, queue: ImageEditQueue) -> None:
+        error = None; config = self.image_edit_queue_configs[key]
+        try:
+            ImageEditQueueRunner(config, self.wavespeed, upload_file=self._wavespeed_upload_cached,
+                save_output=lambda output, output_dir, task_id: self._wavespeed_save_output(output, {"output_dir": output_dir}, task_id,
+                    suffix=f".{queue.items[0].settings.get('output_format', 'png')}"),
+                on_update=lambda item: self._image_edit_item_update(key, queue, item)).run(queue)
+        except Exception as exc: error = exc
+        finally: self._persist_image_edit_queue(key, queue); self._post_wavespeed_event(f"image_edit_queue:{key}:finished", error)
+
+    def _image_edit_item_update(self, key: str, queue: ImageEditQueue, item: ImageEditQueueItem) -> None:
+        self._persist_image_edit_queue(key, queue)
+        if item.task_id and item.status in {QueueStatus.COMPLETED, QueueStatus.FAILED}:
+            self.wavespeed_history.add({"task_id": item.task_id, "model_id": item.model_id, "status": item.status, "output_file": item.output_file, "error": item.error, "payload": {"prompt": item.prompt, "image_paths": item.image_paths, **item.settings}, "created_at": item.created_at})
+        self._post_wavespeed_event(f"image_edit_queue:{key}:item", item)
+
+    def _pause_image_edit_queue(self, key: str) -> None:
+        state = self._image_edit_states[key]
+        if state["active"]: state["active"].paused = True; self._persist_image_edit_queue(key, state["active"])
+
+    def _retry_image_edit_item(self, key: str, item_id: str) -> None:
+        queue = self.image_edit_queues[key].queue(); item = next((row for row in queue.items if row.item_id == item_id), None)
+        if item and not self._image_edit_states[key]["running"]: item.retry(); self._start_image_edit_queue(key)
+
+    def _retry_image_edit_failed(self, key: str) -> None:
+        if not self._image_edit_states[key]["running"]:
+            for item in self.image_edit_queues[key].queue().items:
+                if item.status == QueueStatus.FAILED: item.retry()
+            self._start_image_edit_queue(key)
+
+    def _clear_image_edit_completed(self, key: str) -> None:
+        if not self._image_edit_states[key]["running"]:
+            queue = self.image_edit_queues[key].queue(); queue.items = [item for item in queue.items if item.status != QueueStatus.COMPLETED]
+            self.image_edit_queues[key].load_queue(queue); self._save_image_edit_queue(key)
+
+    def _estimate_image_edit_prices(self, key: str) -> None:
+        queue = self.image_edit_queues[key].queue()
+        self._run_wavespeed_worker(lambda: ImageEditQueueRunner(self.image_edit_queue_configs[key], self.wavespeed,
+            upload_file=self._wavespeed_upload_cached, save_output=lambda *_: "", on_update=lambda item: self._image_edit_item_update(key, queue, item)).estimate_prices(queue), f"image_edit_queue:{key}:prices")
 
     def _face_swap_tab(self) -> QWidget:
         page = QWidget()
@@ -1336,7 +1452,7 @@ class MainWindow(QMainWindow):
         self.flux_generate_button = QPushButton("Generar imagen")
         self.flux_generate_button.clicked.connect(self._flux_generate)
         self.flux_queue_add_button = QPushButton("Agregar a la cola")
-        self.flux_queue_add_button.clicked.connect(self._flux_add_current_to_queue)
+        self.flux_queue_add_button.clicked.connect(lambda: self._enqueue_image_edit_batch("flux"))
         controls.addWidget(estimate)
         controls.addWidget(self.flux_price_label)
         controls.addWidget(self.flux_generate_button)
@@ -1355,20 +1471,18 @@ class MainWindow(QMainWindow):
         self.flux_raw_edit = QTextEdit()
         self.flux_raw_edit.setReadOnly(True)
         layout.addWidget(self.flux_raw_edit)
-        self.flux_queue_widget = FluxQueueWidget()
-        self.flux_queue_widget.queue_changed.connect(self._save_flux_queue)
-        self.flux_queue_widget.campaign_selected.connect(self._select_flux_campaign)
-        self.flux_queue_widget.new_campaign_requested.connect(self._new_flux_campaign)
-        self.flux_queue_widget.save_campaign_requested.connect(self._save_flux_queue)
-        self.flux_queue_widget.delete_campaign_requested.connect(self._delete_flux_campaign)
-        self.flux_queue_widget.start_requested.connect(self._start_flux_queue)
-        self.flux_queue_widget.pause_requested.connect(self._pause_flux_queue)
-        self.flux_queue_widget.retry_requested.connect(self._retry_flux_item)
-        self.flux_queue_widget.retry_failed_requested.connect(self._retry_flux_failed)
-        self.flux_queue_widget.clear_completed_requested.connect(self._clear_flux_completed)
-        self.flux_queue_widget.estimate_requested.connect(self._estimate_flux_queue_prices)
+        self.flux_queue_widget = ImageEditQueueWidget("Nueva campaña Flux", "Opciones Flux")
+        self.flux_queue_widget.set_limits(self.image_edit_queue_configs["flux"].max_parallelism)
+        self.flux_queue_widget.queue_changed.connect(lambda: self._save_image_edit_queue("flux"))
+        self.flux_queue_widget.start_requested.connect(lambda: self._start_image_edit_queue("flux"))
+        self.flux_queue_widget.pause_requested.connect(lambda: self._pause_image_edit_queue("flux"))
+        self.flux_queue_widget.retry_requested.connect(lambda item_id: self._retry_image_edit_item("flux", item_id))
+        self.flux_queue_widget.retry_failed_requested.connect(lambda: self._retry_image_edit_failed("flux"))
+        self.flux_queue_widget.clear_completed_requested.connect(lambda: self._clear_image_edit_completed("flux"))
+        self.flux_queue_widget.estimate_requested.connect(lambda: self._estimate_image_edit_prices("flux"))
         layout.addWidget(self.flux_queue_widget)
-        self._load_flux_campaigns()
+        self.image_edit_queues["flux"] = self.flux_queue_widget
+        self._load_image_edit_campaigns("flux")
         return page
 
     def _flux_add_images(self) -> None:
@@ -1376,7 +1490,7 @@ class MainWindow(QMainWindow):
         existing = {self.flux_images.item(i).data(Qt.UserRole) for i in range(self.flux_images.count())}
         for name in selected:
             path = str(Path(name).resolve())
-            if path in existing or self.flux_images.count() >= 3:
+            if path in existing or self.flux_images.count() >= 100:
                 continue
             item = QListWidgetItem(Path(path).name)
             item.setData(Qt.UserRole, path)
@@ -1639,26 +1753,7 @@ class MainWindow(QMainWindow):
         self._load_flux_campaigns()
 
     def _flux_add_current_to_queue(self) -> None:
-        if self._flux_queue_running:
-            return
-        snapshot = self._flux_snapshot()
-        try:
-            build_flux_payload(**{key: snapshot[key] for key in
-                                  ("prompt", "images", "size", "seed", "enable_sync_mode", "enable_base64_output")})
-            for name in snapshot["images"]:
-                validate_local_reference_file(Path(name), "reference_images")
-        except Exception as exc:
-            self.flux_queue_widget.status_label.setText(f"Error: {exc}")
-            return
-        queue = self.flux_queue_widget.queue()
-        queue.items.append(FluxQueueItem(prompt=snapshot["prompt"], image_paths=list(snapshot["images"]),
-                                         size=snapshot["size"], seed=snapshot["seed"],
-                                         enable_sync_mode=snapshot["enable_sync_mode"],
-                                         enable_base64_output=snapshot["enable_base64_output"]))
-        queue.output_dir = snapshot["output_dir"]
-        self.flux_queue_widget.load_queue(queue)
-        if self._save_flux_queue():
-            self.flux_queue_widget.status_label.setText(f"{len(queue.items)} ítem(s) en cola.")
+        self._enqueue_image_edit_batch("flux")
 
     @staticmethod
     def _validate_flux_queue(queue: FluxQueue) -> None:
@@ -2843,6 +2938,18 @@ class MainWindow(QMainWindow):
     def _handle_wavespeed_event(self, kind: str, payload) -> None:
         if kind == "status":
             self.wavespeed_status_label.setText(str(payload))
+        elif kind.startswith("image_edit_queue:"):
+            _prefix, key, phase = kind.split(":", 2)
+            widget, state = self.image_edit_queues[key], self._image_edit_states[key]
+            if phase == "item":
+                widget.set_item_update(payload)
+                if payload.status in {QueueStatus.COMPLETED, QueueStatus.FAILED}: self._wavespeed_refresh_history()
+            elif phase == "prices":
+                widget.set_total_price(None, str(payload)) if isinstance(payload, Exception) else widget.set_total_price(float(payload))
+            elif phase == "finished":
+                state["running"], state["active"] = False, None
+                widget.set_running(False)
+                widget.status_label.setText(f"Error: {payload}" if isinstance(payload, Exception) else "Cola finalizada.")
         elif kind in {"nano_banana_price", "qwen_image_price"}:
             key = kind.removesuffix("_price")
             label = self._image_edit_controls[key]["price"]
