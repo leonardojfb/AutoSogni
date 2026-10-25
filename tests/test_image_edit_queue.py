@@ -2,17 +2,27 @@ import threading
 from pathlib import Path
 
 from app.wavespeed.image_edit_queue import (
+    FLUX_IMAGE_EDIT_CONFIG,
     ImageEditCampaign,
     ImageEditCampaignStore,
     ImageEditQueue,
     ImageEditQueueConfig,
     ImageEditQueueItem,
     ImageEditQueueRunner,
+    NANO_BANANA_IMAGE_EDIT_CONFIG,
+    QWEN_IMAGE_EDIT_CONFIG,
     expand_image_edit_batch,
+    load_legacy_flux_campaigns,
 )
+from app.wavespeed.flux_queue import FluxCampaign, FluxCampaignStore, FluxQueue, FluxQueueItem
 from app.wavespeed.queue import QueueStatus
 from app.wavespeed.schemas import WaveSpeedPrediction
-from app.wavespeed.validation import QWEN_IMAGE_3_EDIT_MODEL_ID, build_qwen_image_3_edit_payload
+from app.wavespeed.validation import (
+    FLUX_MODEL_ID,
+    NANO_BANANA_PRO_MODEL_ID,
+    QWEN_IMAGE_3_EDIT_MODEL_ID,
+    build_qwen_image_3_edit_payload,
+)
 
 
 QWEN_CONFIG = ImageEditQueueConfig("qwen_image", QWEN_IMAGE_3_EDIT_MODEL_ID,
@@ -171,6 +181,46 @@ def test_parallel_repetitions_upload_a_source_once(tmp_path: Path):
                          save_output=lambda *_args: "out.png").run(queue)
 
     assert uploads == [source]
+
+
+def test_image_edit_adapters_build_only_compatible_payloads():
+    flux = FLUX_IMAGE_EDIT_CONFIG.payload_builder(
+        prompt="edit", images=["https://cdn/source.png"], size="1024*1024", seed=7,
+        enable_sync_mode=False, enable_base64_output=False,
+    )
+    nano = NANO_BANANA_IMAGE_EDIT_CONFIG.payload_builder(
+        prompt="edit", images=["https://cdn/source.png"], aspect_ratio="4:5", resolution="4k",
+        output_format="jpeg", enable_sync_mode=False, enable_base64_output=False,
+    )
+    qwen = QWEN_IMAGE_EDIT_CONFIG.payload_builder(
+        prompt="edit", images=["https://cdn/source.png"], aspect_ratio="9:16", resolution="2k",
+        enable_prompt_expansion=False, seed=42,
+    )
+
+    assert FLUX_IMAGE_EDIT_CONFIG.model_id == FLUX_MODEL_ID
+    assert flux["size"] == "1024*1024"
+    assert NANO_BANANA_IMAGE_EDIT_CONFIG.model_id == NANO_BANANA_PRO_MODEL_ID
+    assert nano["output_format"] == "jpeg"
+    assert QWEN_IMAGE_EDIT_CONFIG.model_id == QWEN_IMAGE_3_EDIT_MODEL_ID
+    assert "size" not in qwen
+    assert "output_format" not in qwen
+
+
+def test_legacy_flux_campaign_conversion_does_not_mutate_source_file(tmp_path: Path):
+    legacy_path = tmp_path / "flux_campaigns.json"
+    store = FluxCampaignStore(legacy_path)
+    store.save(FluxCampaign(name="Anterior", queue=FluxQueue(items=[FluxQueueItem(
+        prompt="edit", image_paths=["C:/old.png"], size="1024*1024", seed=9,
+    )])), active=True)
+    before = legacy_path.read_bytes()
+
+    campaigns, active_id = load_legacy_flux_campaigns(store)
+
+    assert active_id == campaigns[0].campaign_id
+    item = campaigns[0].queue.items[0]
+    assert item.model_id == FLUX_MODEL_ID
+    assert item.settings["size"] == "1024*1024"
+    assert legacy_path.read_bytes() == before
 
 
 def test_store_recovers_running_item(tmp_path: Path):

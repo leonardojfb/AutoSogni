@@ -11,8 +11,18 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from app.utils.paths import data_dir
+from app.wavespeed.flux_queue import FluxCampaign, FluxCampaignStore, FluxQueueItem
 from app.wavespeed.queue import QueueStatus
-from app.wavespeed.validation import TERMINAL_STATUSES, validate_local_reference_file
+from app.wavespeed.validation import (
+    FLUX_MODEL_ID,
+    NANO_BANANA_PRO_MODEL_ID,
+    QWEN_IMAGE_3_EDIT_MODEL_ID,
+    TERMINAL_STATUSES,
+    build_flux_payload,
+    build_nano_banana_pro_payload,
+    build_qwen_image_3_edit_payload,
+    validate_local_reference_file,
+)
 
 
 def _now() -> str:
@@ -29,6 +39,20 @@ class ImageEditQueueConfig:
     display_name: str = "Image edit"
     output_suffix: str = ".png"
     max_parallelism: int = 4
+
+
+FLUX_IMAGE_EDIT_CONFIG = ImageEditQueueConfig(
+    "flux", FLUX_MODEL_ID, build_flux_payload, "flux_image_edit_campaigns.json", 3,
+    "Flux", ".png", 4,
+)
+QWEN_IMAGE_EDIT_CONFIG = ImageEditQueueConfig(
+    "qwen_image", QWEN_IMAGE_3_EDIT_MODEL_ID, build_qwen_image_3_edit_payload,
+    "qwen_image_campaigns.json", 3, "Qwen Image 3.0 Edit", ".png", 4,
+)
+NANO_BANANA_IMAGE_EDIT_CONFIG = ImageEditQueueConfig(
+    "nano_banana", NANO_BANANA_PRO_MODEL_ID, build_nano_banana_pro_payload,
+    "nano_banana_campaigns.json", 14, "Nano Banana Pro", ".png", 4,
+)
 
 
 @dataclass
@@ -131,6 +155,50 @@ class ImageEditCampaign:
                    queue=ImageEditQueue.from_dict(value.get("queue") or {}),
                    created_at=str(value.get("created_at") or _now()),
                    updated_at=str(value.get("updated_at") or _now()))
+
+
+def _legacy_flux_item(item: FluxQueueItem) -> ImageEditQueueItem:
+    return ImageEditQueueItem(
+        item_id=item.item_id,
+        image_paths=list(item.image_paths),
+        prompt=item.prompt,
+        settings={
+            "size": item.size,
+            "seed": item.seed,
+            "enable_sync_mode": item.enable_sync_mode,
+            "enable_base64_output": item.enable_base64_output,
+        },
+        model_key=FLUX_IMAGE_EDIT_CONFIG.key,
+        model_id=FLUX_IMAGE_EDIT_CONFIG.model_id,
+        repetition=1,
+        status=item.status,
+        task_id=item.task_id,
+        price=item.price,
+        output_file=item.output_file,
+        error=item.error,
+        created_at=item.created_at,
+    )
+
+
+def load_legacy_flux_campaigns(store: FluxCampaignStore) -> tuple[list[ImageEditCampaign], str | None]:
+    campaigns, active_id = store.load()
+    converted = [
+        ImageEditCampaign(
+            campaign_id=campaign.campaign_id,
+            name=campaign.name,
+            queue=ImageEditQueue(
+                items=[_legacy_flux_item(item) for item in campaign.queue.items],
+                output_dir=campaign.queue.output_dir,
+                concurrency=4 if campaign.queue.execution_mode == "parallel" else 1,
+                paused=campaign.queue.paused,
+                updated_at=campaign.queue.updated_at,
+            ),
+            created_at=campaign.created_at,
+            updated_at=campaign.updated_at,
+        )
+        for campaign in campaigns
+    ]
+    return converted, active_id
 
 
 class ImageEditCampaignStore:
