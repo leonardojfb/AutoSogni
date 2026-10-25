@@ -394,10 +394,24 @@ class ImageEditQueueRunner:
                    if status != QueueStatus.COMPLETED]
         item.status = QueueStatus.RUNNING
         self._notify(item)
-        with ThreadPoolExecutor(max_workers=max(1, len(pending))) as executor:
-            futures = [executor.submit(process_copy, index) for index in pending]
-            for future in futures:
-                future.result()
+        worker_count = min(max(1, self.config.max_parallelism), len(pending))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            pending_copies = iter(pending)
+            futures = set()
+            while len(futures) < worker_count:
+                try:
+                    futures.add(executor.submit(process_copy, next(pending_copies)))
+                except StopIteration:
+                    break
+            while futures:
+                completed, futures = wait(futures, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    future.result()
+                while len(futures) < worker_count:
+                    try:
+                        futures.add(executor.submit(process_copy, next(pending_copies)))
+                    except StopIteration:
+                        break
         if all(status == QueueStatus.COMPLETED for status in item.copy_statuses):
             item.status = QueueStatus.COMPLETED
         elif any(status == QueueStatus.FAILED for status in item.copy_statuses):

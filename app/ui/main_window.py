@@ -1159,24 +1159,7 @@ class MainWindow(QMainWindow):
     def _image_edit_add_current_to_queue(self, key: str) -> None:
         if key != "qwen_image" or self._qwen_queue_running:
             return
-        snapshot = self._image_edit_snapshot(key)
-        try:
-            settings = {name: snapshot[name] for name in (
-                "aspect_ratio", "resolution", "enable_prompt_expansion", "seed")}
-            items = expand_image_edit_batch(
-                self.image_edit_queue_configs[key], snapshot["images"],
-                repetitions=1, copies=self.qwen_image_queue_widget.copy_count(),
-                prompt=snapshot["prompt"], settings=settings,
-            )
-        except Exception as exc:
-            self.qwen_image_queue_widget.status_label.setText(f"Error: {exc}")
-            return
-        queue = self.qwen_image_queue_widget.queue()
-        queue.items.extend(items)
-        queue.output_dir = snapshot["output_dir"]
-        self.qwen_image_queue_widget.load_queue(queue)
-        if self._save_qwen_queue():
-            self.qwen_image_queue_widget.status_label.setText(f"{len(items)} ítem(s) agregados a la cola.")
+        self._enqueue_image_edit_batch(key)
 
     def _start_qwen_queue(self) -> None:
         if self._qwen_queue_running:
@@ -1278,8 +1261,11 @@ class MainWindow(QMainWindow):
         snapshot = self._flux_snapshot() if key == "flux" else self._image_edit_snapshot(key)
         settings = {name: value for name, value in snapshot.items() if name not in {"prompt", "images", "output_dir"}}
         try:
+            config = self.image_edit_queue_configs[key]
             items = expand_image_edit_batch(self.image_edit_queue_configs[key], snapshot["images"],
-                repetitions=widget.repetitions(), prompt=snapshot["prompt"], settings=settings)
+                repetitions=1 if config.group_references else widget.repetitions(),
+                copies=widget.copy_count() if config.group_references else 1,
+                prompt=snapshot["prompt"], settings=settings)
         except Exception as exc:
             widget.status_label.setText(f"Error: {exc}"); return
         queue = widget.queue(); queue.items.extend(items); queue.output_dir = snapshot["output_dir"]

@@ -85,7 +85,7 @@ def test_runner_submits_all_copies_of_the_reference_set_in_parallel(tmp_path: Pa
                 self.active += 1
                 self.max_active = max(self.max_active, self.active)
                 self.submitted.append(payload["images"])
-                if self.active == 12:
+                if self.active == 4:
                     self.gate.set()
                 task_id = f"task-{len(self.submitted)}"
             return WaveSpeedPrediction(task_id, "created")
@@ -107,7 +107,7 @@ def test_runner_submits_all_copies_of_the_reference_set_in_parallel(tmp_path: Pa
     ))
     config = ImageEditQueueConfig("qwen_image", QWEN_IMAGE_3_EDIT_MODEL_ID,
                                   build_qwen_image_3_edit_payload, "qwen_image_campaigns.json",
-                                  max_parallelism=2, group_references=True)
+                                  max_parallelism=4, group_references=True)
     client = Client()
 
     ImageEditQueueRunner(config, client,
@@ -117,7 +117,7 @@ def test_runner_submits_all_copies_of_the_reference_set_in_parallel(tmp_path: Pa
     assert len(client.submitted) == 12
     assert all(images == [f"https://cdn/source-{index}.png" for index in range(3)]
                for images in client.submitted)
-    assert client.max_active == 12
+    assert client.max_active == 4
     assert {item.status for item in queue.items} == {QueueStatus.COMPLETED}
     assert len(queue.items[0].copy_output_files) == 12
     assert queue.items[0].price == 0.12

@@ -547,7 +547,7 @@ def test_qwen_batch_enqueue_keeps_reference_set_in_one_job(tmp_path: Path):
     window.qwen_image_prompt_edit.setPlainText("Replace background")
     window.qwen_image_queue_widget.concurrency_spin.setValue(12)
 
-    window._image_edit_add_current_to_queue("qwen_image")
+    window._enqueue_image_edit_batch("qwen_image")
 
     queue = window.qwen_image_queue_widget.queue()
     assert len(queue.items) == 1
