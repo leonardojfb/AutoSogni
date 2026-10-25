@@ -447,6 +447,11 @@ def test_seedance_and_flux_tabs_build_model_specific_payloads(tmp_path: Path):
     entry = QListWidgetItem(image.name)
     entry.setData(Qt.UserRole, str(image))
     window.flux_images.addItem(entry)
+    from app.wavespeed.image_edit_queue import ImageEditCampaignStore
+    unified_store = ImageEditCampaignStore(tmp_path / "flux_image_edit_campaigns.json")
+    window.image_edit_campaign_stores["flux"] = unified_store
+    window._image_edit_states["flux"]["campaign_id"] = None
+    window.flux_queue_widget.load_queue(ImageEditQueue())
     window.flux_prompt_edit.setPlainText("Flux prompt")
     window._wavespeed_upload_cached = lambda _path: {"download_url": "https://cdn/image.png"}
     flux_payload = window._flux_upload_and_build(window._flux_snapshot())
@@ -590,6 +595,11 @@ def test_flux_add_to_queue_persists_snapshot_in_its_own_campaign(tmp_path: Path)
         flux_campaign_store=store,
     )
     video_campaign_bytes = (tmp_path / "wavespeed_campaigns.json").read_bytes()
+    from app.wavespeed.image_edit_queue import ImageEditCampaignStore
+    unified_store = ImageEditCampaignStore(tmp_path / "flux_image_edit_campaigns.json")
+    window.image_edit_campaign_stores["flux"] = unified_store
+    window._image_edit_states["flux"]["campaign_id"] = None
+    window.flux_queue_widget.load_queue(ImageEditQueue())
     image = tmp_path / "source.png"
     image.write_bytes(b"png")
     entry = QListWidgetItem(image.name)
@@ -600,18 +610,13 @@ def test_flux_add_to_queue_persists_snapshot_in_its_own_campaign(tmp_path: Path)
     window._flux_add_current_to_queue()
     window.flux_prompt_edit.setPlainText("Changed later")
 
-    campaigns, active_id = store.load()
+    campaigns, active_id = unified_store.load()
     assert active_id == campaigns[0].campaign_id
     assert len(campaigns[0].queue.items) == 1
     assert campaigns[0].queue.items[0].prompt == "Keep exact prompt"
     assert campaigns[0].queue.items[0].image_paths == [str(image)]
-    assert campaigns[0].queue.items[0].size == "1024*1024"
-    assert window.flux_queue_widget.queue().items[0].prompt == "Keep exact prompt"
-
-    window._new_flux_campaign()
-    assert len(store.load()[0]) == 2
-    assert window.flux_queue_widget.queue().items == []
-    window._select_flux_campaign(campaigns[0].campaign_id)
+    assert campaigns[0].queue.items[0].settings["size"] == "1024*1024"
+    assert store.load() == ([], None)
     assert window.flux_queue_widget.queue().items[0].prompt == "Keep exact prompt"
     assert (tmp_path / "wavespeed_campaigns.json").read_bytes() == video_campaign_bytes
 
@@ -651,6 +656,11 @@ def test_flux_queue_runs_from_tab_with_fake_client_and_persists_result(tmp_path:
         flux_campaign_store=store,
     )
     window.wavespeed_history = WaveSpeedHistoryStore(tmp_path / "history.json")
+    from app.wavespeed.image_edit_queue import ImageEditCampaignStore
+    unified_store = ImageEditCampaignStore(tmp_path / "flux_image_edit_campaigns.json")
+    window.image_edit_campaign_stores["flux"] = unified_store
+    window._image_edit_states["flux"]["campaign_id"] = None
+    window.flux_queue_widget.load_queue(ImageEditQueue())
     image = tmp_path / "input.png"
     image.write_bytes(b"input")
     entry = QListWidgetItem(image.name)
@@ -659,16 +669,16 @@ def test_flux_queue_runs_from_tab_with_fake_client_and_persists_result(tmp_path:
     window.flux_prompt_edit.setPlainText("Edit me")
     window.flux_output_edit.setText(str(tmp_path / "outputs"))
     window._flux_add_current_to_queue()
-    window._start_flux_queue()
+    window._start_image_edit_queue("flux")
     deadline = time.monotonic() + 5
-    while window._flux_queue_running and time.monotonic() < deadline:
+    while window._image_edit_states["flux"]["running"] and time.monotonic() < deadline:
         app.processEvents()
         time.sleep(0.01)
     app.processEvents()
 
-    assert not window._flux_queue_running
-    item = store.load()[0][0].queue.items[0]
-    assert item.status == QueueStatus.COMPLETED
+    assert not window._image_edit_states["flux"]["running"]
+    item = unified_store.load()[0][0].queue.items[0]
+    assert item.status == QueueStatus.COMPLETED, item.error
     assert item.task_id == "flux-task"
     assert Path(item.output_file).read_bytes() == b"result"
     assert window.wavespeed_history.list()[0]["model_id"] == FLUX_MODEL_ID

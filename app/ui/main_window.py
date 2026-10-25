@@ -43,6 +43,7 @@ from app.ui.image_edit_queue import ImageEditQueueWidget
 from app.wavespeed.image_edit_queue import (
     ImageEditCampaign, ImageEditCampaignStore, ImageEditQueue,
     ImageEditQueueConfig, ImageEditQueueItem, ImageEditQueueRunner, expand_image_edit_batch,
+    load_legacy_flux_campaigns,
 )
 from app.wavespeed.validation import (
     ASPECT_RATIOS as WAVESPEED_ASPECT_RATIOS,
@@ -130,6 +131,10 @@ class MainWindow(QMainWindow):
         self.wavespeed_campaign_store = wavespeed_campaign_store or WaveSpeedCampaignStore()
         self.flux_campaign_store = flux_campaign_store or FluxCampaignStore()
         self.image_edit_queue_configs = {
+            "flux": ImageEditQueueConfig(
+                "flux", FLUX_MODEL_ID, build_flux_payload, "flux_image_edit_campaigns.json", 3,
+                "Flux", ".png", 4,
+            ),
             "qwen_image": ImageEditQueueConfig(
                 "qwen_image", QWEN_IMAGE_3_EDIT_MODEL_ID, build_qwen_image_3_edit_payload,
                 "qwen_image_campaigns.json", 3,
@@ -143,6 +148,7 @@ class MainWindow(QMainWindow):
             "nano_banana_campaigns.json", 14, "Nano Banana Pro", ".png", 4,
         )
         self.image_edit_campaign_stores = {
+            "flux": ImageEditCampaignStore(data_dir() / "flux_image_edit_campaigns.json"),
             "qwen_image": self.qwen_image_campaign_store,
             "nano_banana": self.nano_banana_campaign_store,
         }
@@ -1239,6 +1245,8 @@ class MainWindow(QMainWindow):
     def _load_image_edit_campaigns(self, key: str) -> None:
         widget, store, state = self.image_edit_queues[key], self.image_edit_campaign_stores[key], self._image_edit_states[key]
         campaigns, active_id = store.load()
+        if key == "flux" and not campaigns:
+            campaigns, active_id = load_legacy_flux_campaigns(self.flux_campaign_store)
         widget.set_campaigns(campaigns, active_id)
         campaign = next((item for item in campaigns if item.campaign_id == active_id), None)
         if campaign:
@@ -1264,7 +1272,7 @@ class MainWindow(QMainWindow):
     def _enqueue_image_edit_batch(self, key: str) -> None:
         state, widget = self._image_edit_states[key], self.image_edit_queues[key]
         if state["running"]: return
-        snapshot = self._image_edit_snapshot(key)
+        snapshot = self._flux_snapshot() if key == "flux" else self._image_edit_snapshot(key)
         settings = {name: value for name, value in snapshot.items() if name not in {"prompt", "images", "output_dir"}}
         try:
             items = expand_image_edit_batch(self.image_edit_queue_configs[key], snapshot["images"],
@@ -1444,7 +1452,7 @@ class MainWindow(QMainWindow):
         self.flux_generate_button = QPushButton("Generar imagen")
         self.flux_generate_button.clicked.connect(self._flux_generate)
         self.flux_queue_add_button = QPushButton("Agregar a la cola")
-        self.flux_queue_add_button.clicked.connect(self._flux_add_current_to_queue)
+        self.flux_queue_add_button.clicked.connect(lambda: self._enqueue_image_edit_batch("flux"))
         controls.addWidget(estimate)
         controls.addWidget(self.flux_price_label)
         controls.addWidget(self.flux_generate_button)
@@ -1463,20 +1471,18 @@ class MainWindow(QMainWindow):
         self.flux_raw_edit = QTextEdit()
         self.flux_raw_edit.setReadOnly(True)
         layout.addWidget(self.flux_raw_edit)
-        self.flux_queue_widget = FluxQueueWidget()
-        self.flux_queue_widget.queue_changed.connect(self._save_flux_queue)
-        self.flux_queue_widget.campaign_selected.connect(self._select_flux_campaign)
-        self.flux_queue_widget.new_campaign_requested.connect(self._new_flux_campaign)
-        self.flux_queue_widget.save_campaign_requested.connect(self._save_flux_queue)
-        self.flux_queue_widget.delete_campaign_requested.connect(self._delete_flux_campaign)
-        self.flux_queue_widget.start_requested.connect(self._start_flux_queue)
-        self.flux_queue_widget.pause_requested.connect(self._pause_flux_queue)
-        self.flux_queue_widget.retry_requested.connect(self._retry_flux_item)
-        self.flux_queue_widget.retry_failed_requested.connect(self._retry_flux_failed)
-        self.flux_queue_widget.clear_completed_requested.connect(self._clear_flux_completed)
-        self.flux_queue_widget.estimate_requested.connect(self._estimate_flux_queue_prices)
+        self.flux_queue_widget = ImageEditQueueWidget("Nueva campaña Flux", "Opciones Flux")
+        self.flux_queue_widget.set_limits(self.image_edit_queue_configs["flux"].max_parallelism)
+        self.flux_queue_widget.queue_changed.connect(lambda: self._save_image_edit_queue("flux"))
+        self.flux_queue_widget.start_requested.connect(lambda: self._start_image_edit_queue("flux"))
+        self.flux_queue_widget.pause_requested.connect(lambda: self._pause_image_edit_queue("flux"))
+        self.flux_queue_widget.retry_requested.connect(lambda item_id: self._retry_image_edit_item("flux", item_id))
+        self.flux_queue_widget.retry_failed_requested.connect(lambda: self._retry_image_edit_failed("flux"))
+        self.flux_queue_widget.clear_completed_requested.connect(lambda: self._clear_image_edit_completed("flux"))
+        self.flux_queue_widget.estimate_requested.connect(lambda: self._estimate_image_edit_prices("flux"))
         layout.addWidget(self.flux_queue_widget)
-        self._load_flux_campaigns()
+        self.image_edit_queues["flux"] = self.flux_queue_widget
+        self._load_image_edit_campaigns("flux")
         return page
 
     def _flux_add_images(self) -> None:
@@ -1484,7 +1490,7 @@ class MainWindow(QMainWindow):
         existing = {self.flux_images.item(i).data(Qt.UserRole) for i in range(self.flux_images.count())}
         for name in selected:
             path = str(Path(name).resolve())
-            if path in existing or self.flux_images.count() >= 3:
+            if path in existing or self.flux_images.count() >= 100:
                 continue
             item = QListWidgetItem(Path(path).name)
             item.setData(Qt.UserRole, path)
@@ -1747,26 +1753,7 @@ class MainWindow(QMainWindow):
         self._load_flux_campaigns()
 
     def _flux_add_current_to_queue(self) -> None:
-        if self._flux_queue_running:
-            return
-        snapshot = self._flux_snapshot()
-        try:
-            build_flux_payload(**{key: snapshot[key] for key in
-                                  ("prompt", "images", "size", "seed", "enable_sync_mode", "enable_base64_output")})
-            for name in snapshot["images"]:
-                validate_local_reference_file(Path(name), "reference_images")
-        except Exception as exc:
-            self.flux_queue_widget.status_label.setText(f"Error: {exc}")
-            return
-        queue = self.flux_queue_widget.queue()
-        queue.items.append(FluxQueueItem(prompt=snapshot["prompt"], image_paths=list(snapshot["images"]),
-                                         size=snapshot["size"], seed=snapshot["seed"],
-                                         enable_sync_mode=snapshot["enable_sync_mode"],
-                                         enable_base64_output=snapshot["enable_base64_output"]))
-        queue.output_dir = snapshot["output_dir"]
-        self.flux_queue_widget.load_queue(queue)
-        if self._save_flux_queue():
-            self.flux_queue_widget.status_label.setText(f"{len(queue.items)} ítem(s) en cola.")
+        self._enqueue_image_edit_batch("flux")
 
     @staticmethod
     def _validate_flux_queue(queue: FluxQueue) -> None:
