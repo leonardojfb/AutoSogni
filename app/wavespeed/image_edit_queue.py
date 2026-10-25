@@ -39,6 +39,7 @@ class ImageEditQueueConfig:
     display_name: str = "Image edit"
     output_suffix: str = ".png"
     max_parallelism: int = 4
+    group_references: bool = False
 
 
 FLUX_IMAGE_EDIT_CONFIG = ImageEditQueueConfig(
@@ -47,7 +48,7 @@ FLUX_IMAGE_EDIT_CONFIG = ImageEditQueueConfig(
 )
 QWEN_IMAGE_EDIT_CONFIG = ImageEditQueueConfig(
     "qwen_image", QWEN_IMAGE_3_EDIT_MODEL_ID, build_qwen_image_3_edit_payload,
-    "qwen_image_campaigns.json", 3, "Qwen Image 3.0 Edit", ".png", 4,
+    "qwen_image_campaigns.json", 3, "Qwen Image 3.0 Edit", ".png", 4, True,
 )
 NANO_BANANA_IMAGE_EDIT_CONFIG = ImageEditQueueConfig(
     "nano_banana", NANO_BANANA_PRO_MODEL_ID, build_nano_banana_pro_payload,
@@ -64,24 +65,52 @@ class ImageEditQueueItem:
     model_key: str = ""
     model_id: str = ""
     repetition: int = 1
+    copies: int = 1
     status: str = QueueStatus.PENDING
     task_id: str = ""
+    copy_task_ids: list[str] = field(default_factory=list)
+    copy_statuses: list[str] = field(default_factory=list)
+    copy_prices: list[float | None] = field(default_factory=list)
+    copy_output_files: list[str] = field(default_factory=list)
+    copy_errors: list[str] = field(default_factory=list)
     price: float | None = None
     output_file: str = ""
     error: str = ""
     created_at: str = field(default_factory=_now)
 
     def retry(self) -> None:
-        self.status, self.task_id, self.price, self.output_file, self.error = (
-            QueueStatus.PENDING, "", None, "", ""
-        )
+        if self.copies > 1 and self.copy_statuses:
+            for index, status in enumerate(self.copy_statuses):
+                if status == QueueStatus.FAILED:
+                    self.copy_statuses[index] = QueueStatus.PENDING
+                    self.copy_task_ids[index] = ""
+                    self.copy_prices[index] = None
+                    self.copy_errors[index] = ""
+            self._sync_copy_summary()
+            self.status, self.error = QueueStatus.PENDING, ""
+            return
+        self.status, self.task_id, self.price, self.output_file, self.error = QueueStatus.PENDING, "", None, "", ""
+
+    def _sync_copy_summary(self) -> None:
+        self.task_id = "\n".join(task_id for task_id in self.copy_task_ids if task_id)
+        self.output_file = "\n".join(path for path in self.copy_output_files if path)
+        failed_errors = [error for status, error in zip(self.copy_statuses, self.copy_errors)
+                         if status == QueueStatus.FAILED and error]
+        self.error = "\n".join(failed_errors)
+        self.price = (sum(price for price in self.copy_prices if price is not None)
+                      if all(price is not None for price in self.copy_prices) else None)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ImageEditQueueItem":
-        return cls(**{name: value[name] for name in cls.__dataclass_fields__ if name in value})
+        item = cls(**{name: value[name] for name in cls.__dataclass_fields__ if name in value})
+        item.copy_statuses = [
+            QueueStatus.PENDING if status in {QueueStatus.RUNNING, QueueStatus.PAUSED} else status
+            for status in item.copy_statuses
+        ]
+        return item
 
 
 @dataclass
@@ -116,6 +145,7 @@ def expand_image_edit_batch(
     image_paths: list[str],
     *,
     repetitions: int,
+    copies: int = 1,
     prompt: str,
     settings: dict[str, Any],
 ) -> list[ImageEditQueueItem]:
@@ -126,6 +156,15 @@ def expand_image_edit_batch(
         raise ValueError("Agregá al menos una imagen.")
     for path in prepared:
         validate_local_reference_file(Path(path), "reference_images")
+    if config.group_references:
+        if copies < 1:
+            raise ValueError("Las copias deben ser al menos 1.")
+        config.payload_builder(prompt=prompt, images=prepared, **settings)
+        return [ImageEditQueueItem(
+            image_paths=prepared, prompt=prompt, settings=dict(settings),
+            model_key=config.key, model_id=config.model_id, copies=copies,
+        )]
+    for path in prepared:
         config.payload_builder(prompt=prompt, images=[path], **settings)
     return [
         ImageEditQueueItem(
@@ -272,9 +311,16 @@ class ImageEditQueueRunner:
         return self.config.payload_builder(prompt=item.prompt, images=urls, **item.settings)
 
     def _process(self, item: ImageEditQueueItem, queue: ImageEditQueue) -> None:
+        if item.copies > 1:
+            self._process_copies(item, queue)
+            return
+        self._process_single(item, queue, self._notify)
+
+    def _process_single(self, item: ImageEditQueueItem, queue: ImageEditQueue,
+                        notify: Callable[[ImageEditQueueItem], None]) -> None:
         try:
             item.status, item.error = QueueStatus.RUNNING, ""
-            self._notify(item)
+            notify(item)
             if item.task_id:
                 prediction = self.client.get_result(item.task_id)
             else:
@@ -284,10 +330,10 @@ class ImageEditQueueRunner:
                     item.price = float(price.get("discounted_price", price.get("price")))
                 except Exception:
                     item.price = None
-                self._notify(item)
+                notify(item)
                 prediction = self.client.submit(payload, model_id=self.config.model_id)
                 item.task_id = prediction.id
-                self._notify(item)
+                notify(item)
             result = prediction if prediction.status in TERMINAL_STATUSES else self.client.poll_result(prediction.id)
             if result.status == "completed" and result.outputs:
                 item.output_file = self.save_output(result.outputs[0], queue.output_dir, result.id)
@@ -298,14 +344,73 @@ class ImageEditQueueRunner:
                 item.status, item.error = QueueStatus.FAILED, result.error or f"WaveSpeed task ended with status: {result.status}"
         except Exception as exc:
             item.status, item.error = QueueStatus.FAILED, str(exc)
+        notify(item)
+
+    def _process_copies(self, item: ImageEditQueueItem, queue: ImageEditQueue) -> None:
+        count = item.copies
+        for values, default in (
+            (item.copy_task_ids, ""),
+            (item.copy_statuses, QueueStatus.PENDING),
+            (item.copy_prices, None),
+            (item.copy_output_files, ""),
+            (item.copy_errors, ""),
+        ):
+            values.extend([default] * (count - len(values)))
+            del values[count:]
+
+        update_lock = Lock()
+
+        def process_copy(index: int) -> None:
+            if item.copy_statuses[index] == QueueStatus.COMPLETED:
+                return
+            child = ImageEditQueueItem(
+                image_paths=list(item.image_paths), prompt=item.prompt, settings=dict(item.settings),
+                model_key=item.model_key, model_id=item.model_id, task_id=item.copy_task_ids[index],
+                status=item.copy_statuses[index], price=item.copy_prices[index],
+                output_file=item.copy_output_files[index], error=item.copy_errors[index],
+            )
+
+            def update(updated: ImageEditQueueItem) -> None:
+                with update_lock:
+                    item.copy_task_ids[index] = updated.task_id
+                    item.copy_statuses[index] = updated.status
+                    item.copy_prices[index] = updated.price
+                    item.copy_output_files[index] = updated.output_file
+                    item.copy_errors[index] = updated.error
+                    item._sync_copy_summary()
+                    if all(status == QueueStatus.COMPLETED for status in item.copy_statuses):
+                        item.status = QueueStatus.COMPLETED
+                    elif any(status == QueueStatus.FAILED for status in item.copy_statuses) and all(
+                        status in {QueueStatus.COMPLETED, QueueStatus.FAILED} for status in item.copy_statuses
+                    ):
+                        item.status = QueueStatus.FAILED
+                    else:
+                        item.status = QueueStatus.RUNNING
+                    self._notify(item)
+
+            self._process_single(child, queue, update)
+
+        pending = [index for index, status in enumerate(item.copy_statuses)
+                   if status != QueueStatus.COMPLETED]
+        item.status = QueueStatus.RUNNING
+        self._notify(item)
+        with ThreadPoolExecutor(max_workers=max(1, len(pending))) as executor:
+            futures = [executor.submit(process_copy, index) for index in pending]
+            for future in futures:
+                future.result()
+        if all(status == QueueStatus.COMPLETED for status in item.copy_statuses):
+            item.status = QueueStatus.COMPLETED
+        elif any(status == QueueStatus.FAILED for status in item.copy_statuses):
+            item.status = QueueStatus.FAILED
         self._notify(item)
 
     def run(self, queue: ImageEditQueue) -> ImageEditQueue:
         pending = iter(item for item in queue.items if item.status in {QueueStatus.PENDING, QueueStatus.PAUSED})
         if queue.paused:
             return queue
-        worker_count = min(max(1, queue.concurrency), max(1, self.config.max_parallelism),
-                           sum(1 for item in queue.items if item.status in {QueueStatus.PENDING, QueueStatus.PAUSED}))
+        worker_count = (1 if self.config.group_references else
+                        min(max(1, queue.concurrency), max(1, self.config.max_parallelism),
+                            sum(1 for item in queue.items if item.status in {QueueStatus.PENDING, QueueStatus.PAUSED})))
         if worker_count < 1:
             return queue
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -332,7 +437,8 @@ class ImageEditQueueRunner:
             try:
                 payload = self._payload(item)
                 price = self.client.estimate_price(payload, model_id=self.config.model_id)
-                item.price, item.error = float(price.get("discounted_price", price.get("price"))), ""
+                item.price = float(price.get("discounted_price", price.get("price"))) * item.copies
+                item.error = ""
                 total += item.price
             except Exception as exc:
                 item.price, item.error = None, f"No se pudo estimar: {exc}"

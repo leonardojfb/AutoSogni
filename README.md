@@ -58,6 +58,10 @@ advanced sync/Base64/webhook controls, price and balance checks, async polling,
 output download, task inspection/deletion, and a sanitized local history. It is
 intentionally independent from the Sogni campaign queue.
 
+For Qwen Image 3.0 Edit, selected reference images are sent together in one job.
+`Copias en paralelo por job` creates that many outputs using the same prompt and
+reference set, grouped into one queue row so the results are easy to compare.
+
 The WaveSpeed section also has a sequential queue: select one shared frame,
 add one reference video per row, and edit each row's prompt, resolution, aspect
 ratio, duration, audio, prompt expansion, and seed. The queue submits only one

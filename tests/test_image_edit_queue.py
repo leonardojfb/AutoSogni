@@ -26,34 +26,34 @@ from app.wavespeed.validation import (
 
 
 QWEN_CONFIG = ImageEditQueueConfig("qwen_image", QWEN_IMAGE_3_EDIT_MODEL_ID,
-                                   build_qwen_image_3_edit_payload, "qwen_image_campaigns.json", 3)
+                                   build_qwen_image_3_edit_payload, "qwen_image_campaigns.json", 3,
+                                   group_references=True)
 
 
-def test_expand_batch_creates_one_persistable_item_per_image_and_repetition(tmp_path: Path):
+def test_expand_batch_creates_one_job_for_reference_set_and_requested_copies(tmp_path: Path):
     sources = []
-    for index in range(6):
+    for index in range(3):
         source = tmp_path / f"source-{index}.png"
         source.write_bytes(b"image")
         sources.append(str(source))
 
     items = expand_image_edit_batch(
-        QWEN_CONFIG, sources, repetitions=2, prompt="replace background",
+        QWEN_CONFIG, sources, repetitions=1, copies=7, prompt="replace background",
         settings={"resolution": "1k", "aspect_ratio": "", "enable_prompt_expansion": True, "seed": -1},
     )
 
-    assert len(items) == 12
-    assert [item.repetition for item in items].count(1) == 6
-    assert [item.repetition for item in items].count(2) == 6
-    assert all(len(item.image_paths) == 1 for item in items)
+    assert len(items) == 1
+    assert items[0].copies == 7
+    assert items[0].image_paths == [str(Path(source).resolve()) for source in sources]
     assert {item.model_id for item in items} == {QWEN_IMAGE_3_EDIT_MODEL_ID}
-    assert len({item.item_id for item in items}) == 12
+    assert len({item.item_id for item in items}) == 1
 
 
 def test_campaign_round_trip_preserves_requested_concurrency_and_task_model(tmp_path: Path):
     store = ImageEditCampaignStore(tmp_path / "campaigns.json")
     queue = ImageEditQueue(concurrency=3, items=[ImageEditQueueItem(
         image_paths=["C:/input.png"], prompt="edit", model_key="qwen_image",
-        model_id=QWEN_IMAGE_3_EDIT_MODEL_ID, repetition=2,
+        model_id=QWEN_IMAGE_3_EDIT_MODEL_ID, repetition=2, copies=7,
         settings={"resolution": "2k", "aspect_ratio": "", "enable_prompt_expansion": True, "seed": -1},
     )])
     campaign = ImageEditCampaign(name="Doce resultados", queue=queue)
@@ -64,10 +64,11 @@ def test_campaign_round_trip_preserves_requested_concurrency_and_task_model(tmp_
     assert active_id == campaign.campaign_id
     assert loaded[0].queue.concurrency == 3
     assert loaded[0].queue.items[0].repetition == 2
+    assert loaded[0].queue.items[0].copies == 7
     assert loaded[0].queue.items[0].model_id == QWEN_IMAGE_3_EDIT_MODEL_ID
 
 
-def test_runner_submits_all_twelve_tasks_with_bounded_parallelism(tmp_path: Path):
+def test_runner_submits_all_copies_of_the_reference_set_in_parallel(tmp_path: Path):
     class Client:
         def __init__(self):
             self.active = 0
@@ -83,10 +84,11 @@ def test_runner_submits_all_twelve_tasks_with_bounded_parallelism(tmp_path: Path
             with self.lock:
                 self.active += 1
                 self.max_active = max(self.max_active, self.active)
-                self.submitted.append(payload["images"][0])
-                if self.active == 2:
+                self.submitted.append(payload["images"])
+                if self.active == 12:
                     self.gate.set()
-            return WaveSpeedPrediction(payload["images"][0], "created")
+                task_id = f"task-{len(self.submitted)}"
+            return WaveSpeedPrediction(task_id, "created")
 
         def poll_result(self, task_id):
             assert self.gate.wait(1)
@@ -95,17 +97,17 @@ def test_runner_submits_all_twelve_tasks_with_bounded_parallelism(tmp_path: Path
             return WaveSpeedPrediction(task_id, "completed", outputs=["https://cdn/out.png"])
 
     sources = []
-    for index in range(6):
+    for index in range(3):
         source = tmp_path / f"source-{index}.png"
         source.write_bytes(b"image")
         sources.append(str(source))
     queue = ImageEditQueue(concurrency=3, items=expand_image_edit_batch(
-        QWEN_CONFIG, sources, repetitions=2, prompt="edit",
+        QWEN_CONFIG, sources, repetitions=1, copies=12, prompt="edit",
         settings={"resolution": "1k", "aspect_ratio": "", "enable_prompt_expansion": True, "seed": -1},
     ))
     config = ImageEditQueueConfig("qwen_image", QWEN_IMAGE_3_EDIT_MODEL_ID,
                                   build_qwen_image_3_edit_payload, "qwen_image_campaigns.json",
-                                  max_parallelism=2)
+                                  max_parallelism=2, group_references=True)
     client = Client()
 
     ImageEditQueueRunner(config, client,
@@ -113,8 +115,12 @@ def test_runner_submits_all_twelve_tasks_with_bounded_parallelism(tmp_path: Path
                          save_output=lambda *_args: "out.png").run(queue)
 
     assert len(client.submitted) == 12
-    assert client.max_active <= 2
+    assert all(images == [f"https://cdn/source-{index}.png" for index in range(3)]
+               for images in client.submitted)
+    assert client.max_active == 12
     assert {item.status for item in queue.items} == {QueueStatus.COMPLETED}
+    assert len(queue.items[0].copy_output_files) == 12
+    assert queue.items[0].price == 0.12
 
 
 def test_runner_continues_after_one_failure_and_retries_only_that_item(tmp_path: Path):
@@ -127,20 +133,19 @@ def test_runner_continues_after_one_failure_and_retries_only_that_item(tmp_path:
             return {"price": 0.01}
 
         def submit(self, payload, **_kwargs):
-            name = payload["images"][0].rsplit("/", 1)[-1]
-            self.submitted.append(name)
-            if name == "source-2.png" and not self.failed_once:
+            self.submitted.append(payload["images"])
+            if not self.failed_once:
                 self.failed_once = True
                 raise RuntimeError("planned submit failure")
-            return WaveSpeedPrediction(name, "completed", outputs=["https://cdn/out.png"])
+            return WaveSpeedPrediction(str(len(self.submitted)), "completed", outputs=["https://cdn/out.png"])
 
     sources = []
-    for index in range(6):
+    for index in range(2):
         source = tmp_path / f"source-{index}.png"
         source.write_bytes(b"image")
         sources.append(str(source))
     queue = ImageEditQueue(items=expand_image_edit_batch(
-        QWEN_CONFIG, sources, repetitions=2, prompt="edit",
+        QWEN_CONFIG, sources, repetitions=1, copies=2, prompt="edit",
         settings={"resolution": "1k", "aspect_ratio": "", "enable_prompt_expansion": True, "seed": -1},
     ))
     client = Client()
@@ -152,12 +157,14 @@ def test_runner_continues_after_one_failure_and_retries_only_that_item(tmp_path:
 
     failed = [item for item in queue.items if item.status == QueueStatus.FAILED]
     assert len(failed) == 1
-    assert sum(item.status == QueueStatus.COMPLETED for item in queue.items) == 11
+    assert sum(item.status == QueueStatus.COMPLETED for item in queue.items) == 0
+    assert failed[0].copy_statuses.count(QueueStatus.COMPLETED) == 1
     failed[0].retry()
     runner.run(queue)
 
     assert {item.status for item in queue.items} == {QueueStatus.COMPLETED}
-    assert client.submitted.count("source-2.png") == 3
+    assert len(client.submitted) == 3
+    assert all(len(images) == 2 for images in client.submitted)
 
 
 def test_parallel_repetitions_upload_a_source_once(tmp_path: Path):
@@ -166,12 +173,12 @@ def test_parallel_repetitions_upload_a_source_once(tmp_path: Path):
             return {"price": 0.01}
 
         def submit(self, payload, **_kwargs):
-            return WaveSpeedPrediction(payload["images"][0], "completed", outputs=["https://cdn/out.png"])
+            return WaveSpeedPrediction(str(len(payload["images"])), "completed", outputs=["https://cdn/out.png"])
 
     source = tmp_path / "same.png"
     source.write_bytes(b"image")
     queue = ImageEditQueue(concurrency=4, items=expand_image_edit_batch(
-        QWEN_CONFIG, [str(source)], repetitions=6, prompt="edit",
+        QWEN_CONFIG, [str(source)], repetitions=1, copies=6, prompt="edit",
         settings={"resolution": "1k", "aspect_ratio": "", "enable_prompt_expansion": True, "seed": -1},
     ))
     uploads = []

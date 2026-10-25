@@ -57,13 +57,15 @@ class ImageEditQueueWidget(QWidget):
         layout.addWidget(QLabel(settings_label))
         batch = QHBoxLayout()
         self.repetition_spin, self.concurrency_spin = WheelSafeSpinBox(), WheelSafeSpinBox()
+        self.repetition_label = QLabel("Generaciones por imagen")
+        self.concurrency_label = QLabel("Paralelismo")
         self.repetition_spin.setRange(1, 100)
         self.repetition_spin.setValue(1)
         self.concurrency_spin.setRange(1, 1)
         self.concurrency_spin.setValue(1)
-        batch.addWidget(QLabel("Generaciones por imagen"))
+        batch.addWidget(self.repetition_label)
         batch.addWidget(self.repetition_spin)
-        batch.addWidget(QLabel("Paralelismo"))
+        batch.addWidget(self.concurrency_label)
         batch.addWidget(self.concurrency_spin)
         batch.addStretch()
         layout.addLayout(batch)
@@ -101,7 +103,8 @@ class ImageEditQueueWidget(QWidget):
         row = self.table.rowCount(); self.table.insertRow(row)
         settings = "; ".join(f"{key}={value}" for key, value in sorted(item.settings.items()))
         cells = [self._cell(row + 1), self._cell(", ".join(Path(name).name for name in item.image_paths)),
-                 self._cell(item.repetition), self._cell(item.model_id), self._cell(item.prompt, True),
+                 self._cell(item.copies if item.copies > 1 else item.repetition),
+                 self._cell(item.model_id), self._cell(item.prompt, True),
                  self._cell(settings), self._cell("-" if item.price is None else f"${item.price:.4f}"),
                  self._cell(item.status), self._cell(item.task_id), self._cell(item.output_file), self._cell(item.error)]
         cells[self.STATUS_COLUMN].setData(Qt.UserRole, item.item_id); cells[self.IMAGE_COLUMN].setToolTip("\n".join(item.image_paths))
@@ -140,6 +143,16 @@ class ImageEditQueueWidget(QWidget):
 
     def set_limits(self, max_parallelism: int) -> None:
         self.concurrency_spin.setRange(1, max(1, int(max_parallelism)))
+
+    def set_copy_mode(self) -> None:
+        self.repetition_label.hide()
+        self.repetition_spin.hide()
+        self.concurrency_label.setText("Copias en paralelo por job")
+        self.concurrency_spin.setRange(1, 2_147_483_647)
+        self.table.horizontalHeaderItem(self.REPETITION_COLUMN).setText("Copias")
+
+    def copy_count(self) -> int:
+        return self.concurrency_spin.value()
 
     def set_item_update(self, updated: ImageEditQueueItem) -> None:
         for row in range(self.table.rowCount()):

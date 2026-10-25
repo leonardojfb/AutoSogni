@@ -137,7 +137,7 @@ class MainWindow(QMainWindow):
             ),
             "qwen_image": ImageEditQueueConfig(
                 "qwen_image", QWEN_IMAGE_3_EDIT_MODEL_ID, build_qwen_image_3_edit_payload,
-                "qwen_image_campaigns.json", 3,
+                "qwen_image_campaigns.json", 3, group_references=True,
             ),
         }
         self.qwen_image_campaign_store = qwen_image_campaign_store or ImageEditCampaignStore(
@@ -1001,7 +1001,10 @@ class MainWindow(QMainWindow):
         if key in self.image_edit_queue_configs:
             queue_widget = ImageEditQueueWidget(f"Nueva campaña {self.image_edit_queue_configs[key].display_name}",
                                                  f"Opciones {self.image_edit_queue_configs[key].display_name}")
-            queue_widget.set_limits(self.image_edit_queue_configs[key].max_parallelism)
+            if key == "qwen_image":
+                queue_widget.set_copy_mode()
+            else:
+                queue_widget.set_limits(self.image_edit_queue_configs[key].max_parallelism)
             queue_widget.queue_changed.connect(lambda model_key=key: self._save_image_edit_queue(model_key))
             queue_widget.start_requested.connect(lambda model_key=key: self._start_image_edit_queue(model_key))
             queue_widget.pause_requested.connect(lambda model_key=key: self._pause_image_edit_queue(model_key))
@@ -1162,7 +1165,7 @@ class MainWindow(QMainWindow):
                 "aspect_ratio", "resolution", "enable_prompt_expansion", "seed")}
             items = expand_image_edit_batch(
                 self.image_edit_queue_configs[key], snapshot["images"],
-                repetitions=self.qwen_image_queue_widget.repetitions(),
+                repetitions=1, copies=self.qwen_image_queue_widget.copy_count(),
                 prompt=snapshot["prompt"], settings=settings,
             )
         except Exception as exc:
