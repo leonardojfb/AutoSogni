@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,7 +25,10 @@ class ImageEditQueueConfig:
     model_id: str
     payload_builder: Callable[..., dict[str, Any]]
     campaign_filename: str
-    max_images: int
+    max_images: int = 0
+    display_name: str = "Image edit"
+    output_suffix: str = ".png"
+    max_parallelism: int = 4
 
 
 @dataclass
@@ -33,6 +37,9 @@ class ImageEditQueueItem:
     image_paths: list[str] = field(default_factory=list)
     prompt: str = ""
     settings: dict[str, Any] = field(default_factory=dict)
+    model_key: str = ""
+    model_id: str = ""
+    repetition: int = 1
     status: str = QueueStatus.PENDING
     task_id: str = ""
     price: float | None = None
@@ -57,11 +64,13 @@ class ImageEditQueueItem:
 class ImageEditQueue:
     items: list[ImageEditQueueItem] = field(default_factory=list)
     output_dir: str = ""
+    concurrency: int = 1
     paused: bool = False
     updated_at: str = field(default_factory=_now)
 
     def to_dict(self) -> dict[str, Any]:
         return {"items": [item.to_dict() for item in self.items], "output_dir": self.output_dir,
+                "concurrency": self.concurrency,
                 "paused": self.paused, "updated_at": self.updated_at}
 
     @classmethod
@@ -70,8 +79,37 @@ class ImageEditQueue:
         for item in items:
             if item.status in {QueueStatus.RUNNING, QueueStatus.PAUSED}:
                 item.status = QueueStatus.PENDING
-        return cls(items=items, output_dir=str(value.get("output_dir") or ""),
+        try:
+            concurrency = int(value.get("concurrency", 1))
+        except (TypeError, ValueError):
+            concurrency = 1
+        return cls(items=items, output_dir=str(value.get("output_dir") or ""), concurrency=max(1, concurrency),
                    paused=bool(value.get("paused", False)), updated_at=str(value.get("updated_at") or _now()))
+
+
+def expand_image_edit_batch(
+    config: ImageEditQueueConfig,
+    image_paths: list[str],
+    *,
+    repetitions: int,
+    prompt: str,
+    settings: dict[str, Any],
+) -> list[ImageEditQueueItem]:
+    if repetitions < 1:
+        raise ValueError("Las repeticiones deben ser al menos 1.")
+    prepared = [str(Path(path).resolve()) for path in image_paths]
+    if not prepared:
+        raise ValueError("Agregá al menos una imagen.")
+    for path in prepared:
+        validate_local_reference_file(Path(path), "reference_images")
+        config.payload_builder(prompt=prompt, images=[path], **settings)
+    return [
+        ImageEditQueueItem(
+            image_paths=[path], prompt=prompt, settings=dict(settings),
+            model_key=config.key, model_id=config.model_id, repetition=repetition,
+        )
+        for path in prepared for repetition in range(1, repetitions + 1)
+    ]
 
 
 @dataclass
@@ -144,6 +182,8 @@ class ImageEditQueueRunner:
                  on_update: Callable[[ImageEditQueueItem], None] | None = None) -> None:
         self.config, self.client, self.upload_file, self.save_output, self.on_update = (
             config, client, upload_file, save_output, on_update)
+        self._uploads: dict[str, str] = {}
+        self._upload_lock = Lock()
 
     def _notify(self, item: ImageEditQueueItem) -> None:
         if self.on_update:
@@ -156,7 +196,11 @@ class ImageEditQueueRunner:
         for name in item.image_paths:
             path = Path(name)
             validate_local_reference_file(path, "reference_images")
-            urls.append(self.upload_file(path)["download_url"])
+            key = str(path.resolve())
+            with self._upload_lock:
+                if key not in self._uploads:
+                    self._uploads[key] = self.upload_file(path)["download_url"]
+                urls.append(self._uploads[key])
         return self.config.payload_builder(prompt=item.prompt, images=urls, **item.settings)
 
     def _process(self, item: ImageEditQueueItem, queue: ImageEditQueue) -> None:
@@ -181,7 +225,7 @@ class ImageEditQueueRunner:
                 item.output_file = self.save_output(result.outputs[0], queue.output_dir, result.id)
                 item.status = QueueStatus.COMPLETED
             elif result.status == "completed":
-                raise ValueError("Qwen completed without an output image.")
+                raise ValueError(f"{self.config.display_name} completed without an output image.")
             else:
                 item.status, item.error = QueueStatus.FAILED, result.error or f"WaveSpeed task ended with status: {result.status}"
         except Exception as exc:
@@ -189,11 +233,29 @@ class ImageEditQueueRunner:
         self._notify(item)
 
     def run(self, queue: ImageEditQueue) -> ImageEditQueue:
-        for item in queue.items:
-            if queue.paused:
-                break
-            if item.status in {QueueStatus.PENDING, QueueStatus.PAUSED}:
-                self._process(item, queue)
+        pending = iter(item for item in queue.items if item.status in {QueueStatus.PENDING, QueueStatus.PAUSED})
+        if queue.paused:
+            return queue
+        worker_count = min(max(1, queue.concurrency), max(1, self.config.max_parallelism),
+                           sum(1 for item in queue.items if item.status in {QueueStatus.PENDING, QueueStatus.PAUSED}))
+        if worker_count < 1:
+            return queue
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = set()
+            while not queue.paused and len(futures) < worker_count:
+                try:
+                    futures.add(executor.submit(self._process, next(pending), queue))
+                except StopIteration:
+                    break
+            while futures:
+                completed, futures = wait(futures, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    future.result()
+                while not queue.paused and len(futures) < worker_count:
+                    try:
+                        futures.add(executor.submit(self._process, next(pending), queue))
+                    except StopIteration:
+                        break
         return queue
 
     def estimate_prices(self, queue: ImageEditQueue) -> float:
