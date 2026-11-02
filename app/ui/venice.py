@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import threading
 from uuid import uuid4
@@ -66,12 +67,16 @@ class VeniceEditWidget(QWidget):
     ) -> None:
         super().__init__(parent)
         self.client = client
-        self.key_store = key_store
-        self.key_store.env_name = "VENICE_API_KEY"
+        key_path = Path(key_store.path)
+        if key_store.env_name != "VENICE_API_KEY":
+            key_path = key_path.with_name("venice_api_key.txt")
+        self.key_store = ApiKeyStore(key_path, env_name="VENICE_API_KEY")
         self.history_store = history_store or VeniceHistoryStore()
         self.output_dir = data_dir() / "venice_outputs"
         self._profiles: dict[str, ModelProfile] = {}
         self._request_active = False
+        self._pending_result: VeniceImageResult | None = None
+        self._pending_snapshot: dict[str, object] | None = None
         self._catalog_active = False
         self._catalog_events = _WorkerEvents(self)
         self._request_events = _WorkerEvents(self)
@@ -89,7 +94,10 @@ class VeniceEditWidget(QWidget):
         self.save_key_button = QPushButton("Save key")
         self.save_key_button.clicked.connect(self._save_key)
         key_row.addWidget(self.save_key_button)
+        self.key_source_label = QLabel()
+        key_row.addWidget(self.key_source_label)
         root.addLayout(key_row)
+        self._refresh_key_source()
 
         model_row = QHBoxLayout()
         model_row.addWidget(QLabel("Model"))
@@ -148,6 +156,10 @@ class VeniceEditWidget(QWidget):
         self.refresh_catalog()
 
     def _save_key(self) -> None:
+        self._refresh_key_source()
+        if os.environ.get("VENICE_API_KEY", "").strip():
+            self.status_label.setText("VENICE_API_KEY is active; file key was not saved.")
+            return
         try:
             self.key_store.save(self.key_edit.text())
             self.client.api_key = self.key_store.get()
@@ -156,7 +168,15 @@ class VeniceEditWidget(QWidget):
         else:
             self.status_label.setText("Venice API key saved.")
 
+    def _refresh_key_source(self) -> None:
+        environment_active = bool(os.environ.get("VENICE_API_KEY", "").strip())
+        self.key_edit.setReadOnly(environment_active)
+        self.save_key_button.setEnabled(not environment_active)
+        self.key_source_label.setText("VENICE_API_KEY is active; file key disabled."
+                                      if environment_active else "Local Venice key")
+
     def refresh_catalog(self) -> None:
+        self._refresh_key_source()
         if self._catalog_active:
             return
         self._catalog_active = True
@@ -281,6 +301,18 @@ class VeniceEditWidget(QWidget):
     def generate(self) -> None:
         if self._request_active:
             return
+        if self._pending_result is not None:
+            snapshot = dict(self._pending_snapshot)
+            snapshot["reference_paths"] = list(snapshot["reference_paths"])
+            snapshot["options"] = dict(snapshot["options"])
+            snapshot["output_dir"] = Path(self.output_dir)
+            result = self._pending_result
+            self._request_active = True
+            self.generate_button.setEnabled(False)
+            self.status_label.setText("Saving received Venice image…")
+            threading.Thread(target=lambda: self._save_result(result, snapshot),
+                             name="Venice local save", daemon=True).start()
+            return
         try:
             snapshot = self._build_request_snapshot()
         except ValueError as exc:
@@ -294,21 +326,42 @@ class VeniceEditWidget(QWidget):
             try:
                 payload = self._build_payload_from_snapshot(snapshot)
                 result = self.client.multi_edit(payload)
-                saved = save_venice_output(result, snapshot["output_dir"])
-                self._request_events.completed.emit((saved, result.request_id, snapshot), None)
+                self._save_result(result, snapshot)
             except Exception as exc:
                 self._request_events.completed.emit(None, exc)
 
         threading.Thread(target=work, name="Venice image edit", daemon=True).start()
+
+    def _save_result(self, result: VeniceImageResult, snapshot: dict[str, object]) -> None:
+        try:
+            saved = save_venice_output(result, snapshot["output_dir"])
+        except Exception:
+            self._request_events.completed.emit(("save_failed", result, snapshot), None)
+        else:
+            self._request_events.completed.emit(("saved", saved, result.request_id, snapshot), None)
 
     def _on_request_complete(self, completed: object, error: object) -> None:
         try:
             if error is not None:
                 self.status_label.setText(self._error_message(error))
                 return
-            output_path, request_id, snapshot = completed
+            if completed[0] == "save_failed":
+                _, self._pending_result, self._pending_snapshot = completed
+                self.generate_button.setText("Save received image")
+                self.status_label.setText(
+                    "Venice image received, but local save failed. Choose an output folder and click "
+                    "Save received image; no new request will be sent.")
+                return
+            _, output_path, request_id, snapshot = completed
+            self._pending_result = None
+            self._pending_snapshot = None
+            self.generate_button.setText("Generate")
             preview = QPixmap(str(output_path))
-            if not preview.isNull():
+            preview_unavailable = preview.isNull()
+            if preview_unavailable:
+                self.preview_label.clear()
+                self.preview_label.setText("Preview unavailable")
+            else:
                 self.preview_label.setPixmap(preview)
             paths = snapshot["reference_paths"]
             record = {
@@ -322,7 +375,10 @@ class VeniceEditWidget(QWidget):
             self._insert_history_row(datetime.now(timezone.utc).isoformat(),
                                      snapshot["profile"].id, snapshot["prompt"],
                                      ", ".join(path.name for path in paths), str(output_path))
-            self.status_label.setText(f"Saved Venice image: {output_path}")
+            if preview_unavailable:
+                self.status_label.setText(f"Saved Venice image: {output_path}. Preview unavailable.")
+            else:
+                self.status_label.setText(f"Saved Venice image: {output_path}")
         except Exception:
             self.status_label.setText("Venice output was saved, but history or preview could not be updated.")
         finally:

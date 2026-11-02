@@ -11,6 +11,7 @@ from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QLineEdit
 
 from app.sogni.auth import ApiKeyStore
+from app.ui import venice as venice_ui
 from app.ui.venice import VeniceEditWidget
 from app.venice.client import VeniceApiError, VeniceImageResult
 from app.venice.history import VeniceHistoryStore
@@ -149,6 +150,33 @@ def test_key_field_uses_venice_environment_and_password_echo(tmp_path, monkeypat
     assert widget.key_edit.echoMode() == QLineEdit.Password
     assert widget.key_edit.text() == "venice-only"
     assert client.api_key == "venice-only"
+    assert not widget.save_key_button.isEnabled()
+    assert "VENICE_API_KEY" in widget.key_source_label.text()
+    widget.key_edit.setText("new-file-key")
+    widget._save_key()
+    assert client.api_key == "venice-only"
+    assert not (tmp_path / "venice_api_key.txt").exists()
+    widget.close()
+
+
+def test_shared_sogni_key_store_is_not_mutated_or_written(tmp_path, monkeypatch):
+    monkeypatch.delenv("VENICE_API_KEY", raising=False)
+    monkeypatch.delenv("SOGNI_API_KEY", raising=False)
+    sogni_path = tmp_path / "sogni_api_key.txt"
+    sogni_path.write_text("sogni-only", encoding="utf-8")
+    shared_store = ApiKeyStore(sogni_path)
+    client = FakeVeniceClient()
+    _app()
+    widget = VeniceEditWidget(client, shared_store, VeniceHistoryStore(tmp_path / "history.json"))
+    _wait_until(lambda: not widget._catalog_active)
+    assert shared_store.env_name == "SOGNI_API_KEY"
+    assert shared_store.path == sogni_path
+    assert widget.key_edit.text() != "sogni-only"
+    widget.key_edit.setText("venice-only")
+    widget.save_key_button.click()
+    assert sogni_path.read_text(encoding="utf-8") == "sogni-only"
+    assert (tmp_path / "venice_api_key.txt").read_text(encoding="utf-8") == "venice-only"
+    assert client.api_key == "venice-only"
     widget.close()
 
 
@@ -194,6 +222,58 @@ def test_binary_response_saved_previewed_and_history_sanitized(tmp_path):
     assert '"slot": 1' in disk and '"slot": 2' in disk
     assert base64.b64encode(output).decode("ascii") not in disk
     assert "secret prompt" not in disk and str(files[0]) not in disk
+    widget.close()
+
+
+def test_save_failure_retains_paid_response_for_local_save_without_second_request(tmp_path, monkeypatch):
+    output = _image(tmp_path / "sample.png").read_bytes()
+    client = FakeVeniceClient(result=VeniceImageResult(output, "image/png", "req-1", {}))
+    widget = _widget(tmp_path, client)
+    scene = _image(tmp_path / "scene.png")
+    widget.set_reference_path(0, scene)
+    widget.prompt_edit.setPlainText("original prompt")
+    original_save = venice_ui.save_venice_output
+    attempts = []
+
+    def fail_once(result, directory):
+        attempts.append(Path(directory))
+        if len(attempts) == 1:
+            raise OSError("disk full")
+        return original_save(result, directory)
+
+    monkeypatch.setattr(venice_ui, "save_venice_output", fail_once)
+    widget.output_dir = tmp_path / "unwritable"
+    widget.generate_button.click()
+    _wait_until(lambda: not widget._request_active)
+    assert len(client.calls) == 1
+    assert "save" in widget.status_label.text().lower()
+    assert "no new" in widget.status_label.text().lower()
+    assert widget.history_table.rowCount() == 0
+    widget.prompt_edit.setPlainText("changed prompt")
+    widget.set_reference_path(0, None)
+    widget.output_dir = tmp_path / "writable"
+    widget.generate_button.click()
+    _wait_until(lambda: not widget._request_active)
+    assert len(client.calls) == 1
+    assert attempts == [tmp_path / "unwritable", tmp_path / "writable"]
+    assert list(widget.output_dir.glob("*.png"))[0].read_bytes() == output
+    assert widget.history_table.item(0, 2).text() == "original prompt"
+    assert widget.history_table.item(0, 3).text() == "scene.png"
+    widget.close()
+
+
+def test_saved_non_previewable_image_reports_preview_failure(tmp_path):
+    client = FakeVeniceClient(result=VeniceImageResult(b"not-a-png", "image/png", "req", {}))
+    widget = _widget(tmp_path, client)
+    widget.set_reference_path(0, _image(tmp_path / "scene.png"))
+    widget.prompt_edit.setPlainText("edit")
+    widget.output_dir = tmp_path / "outputs"
+    widget.generate_button.click()
+    _wait_until(lambda: not widget._request_active)
+    assert list(widget.output_dir.glob("*.png"))[0].read_bytes() == b"not-a-png"
+    assert "preview" in widget.status_label.text().lower()
+    assert "unavailable" in widget.status_label.text().lower()
+    assert widget.preview_label.text() == "Preview unavailable"
     widget.close()
 
 
