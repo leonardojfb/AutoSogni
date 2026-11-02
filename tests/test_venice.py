@@ -7,6 +7,7 @@ import pytest
 
 from app.sogni.auth import ApiKeyStore
 from app.venice.client import VeniceApiError, VeniceClient
+from app.venice.history import VeniceHistoryStore, sanitize_history_record
 from app.venice.validation import (
     ModelProfile,
     REQUESTED_MODEL_IDS,
@@ -307,3 +308,49 @@ def test_validate_local_image_uses_decimal_25mb_boundary(tmp_path):
         stream.truncate(limit)
     with pytest.raises(ValueError, match="25 MB"):
         validate_local_image(at_limit)
+
+
+def test_venice_history_redacts_secrets_prompt_and_source_paths(tmp_path):
+    store = VeniceHistoryStore(tmp_path / "venice_history.json")
+    store.add({
+        "provider": "Venice", "model_id": "qwen-image-2-1-pro-edit",
+        "prompt": "Keep exact", "request_id": "request-1", "created_at": "2026-11-02T00:00:00Z",
+        "references": [{"slot": 1, "filename": "scene.png"}, {"slot": 2, "filename": "face.png"}],
+        "parameters": {"aspect_ratio": "1:1", "resolution": "2K", "output_format": "png",
+                       "images": ["a" * 100], "Authorization": "Bearer secret"},
+        "source_paths": [str(tmp_path / "scene.png")], "output_file": str(tmp_path / "out.png"),
+        "headers": {"Authorization": "Bearer secret"},
+    })
+    record = store.list()[0]
+    encoded = json.dumps(record)
+    assert "secret" not in encoded and "Bearer" not in encoded
+    assert "a" * 100 not in encoded and "Keep exact" not in encoded
+    assert str(tmp_path) not in encoded
+    assert record["references"] == [{"slot": 1, "filename": "scene.png"}, {"slot": 2, "filename": "face.png"}]
+    assert record["parameters"] == {"aspect_ratio": "1:1", "resolution": "2K", "output_format": "png"}
+
+
+def test_venice_history_is_newest_first_capped_at_100_and_atomic(tmp_path):
+    path = tmp_path / "nested" / "venice_history.json"
+    store = VeniceHistoryStore(path)
+    for index in range(105):
+        store.add({"request_id": str(index), "model_id": "qwen-image-2-1-pro-edit"})
+    records = store.list()
+    assert len(records) == 100
+    assert records[0]["request_id"] == "104"
+    assert records[-1]["request_id"] == "5"
+    assert path.exists()
+    assert not path.with_suffix(".json.tmp").exists()
+
+
+def test_sanitize_history_record_whitelists_nested_metadata():
+    record = sanitize_history_record({
+        "request_id": "req", "provider": "Venice", "model_id": "model", "prompt": "private",
+        "references": [{"slot": 2, "filename": "face.png", "path": "C:/secret/face.png", "data": "base64"}],
+        "parameters": {"safe_mode": True, "seed": 42, "prompt": "private", "token": "secret"},
+        "unexpected": "secret",
+    })
+    encoded = json.dumps(record)
+    assert record["references"] == [{"slot": 2, "filename": "face.png"}]
+    assert record["parameters"] == {"safe_mode": True, "seed": 42}
+    assert "private" not in encoded and "secret" not in encoded and "base64" not in encoded
