@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 import traceback
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 import httpx
 import pytest
@@ -354,3 +356,30 @@ def test_sanitize_history_record_whitelists_nested_metadata():
     assert record["references"] == [{"slot": 2, "filename": "face.png"}]
     assert record["parameters"] == {"safe_mode": True, "seed": 42}
     assert "private" not in encoded and "secret" not in encoded and "base64" not in encoded
+
+
+def test_venice_history_concurrent_stores_use_unique_temporary_files(tmp_path, monkeypatch):
+    from app.venice import history as history_module
+
+    destination = tmp_path / "venice_history.json"
+    stores = [VeniceHistoryStore(destination), VeniceHistoryStore(destination)]
+    barrier = threading.Barrier(2)
+    replace_lock = threading.Lock()
+    temporary_paths = []
+    actual_replace = history_module.os.replace
+
+    def synchronized_replace(source, target):
+        temporary_paths.append(Path(source))
+        barrier.wait(timeout=5)
+        with replace_lock:
+            actual_replace(source, target)
+
+    monkeypatch.setattr(history_module.os, "replace", synchronized_replace)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [pool.submit(store.add, {"request_id": str(index)}) for index, store in enumerate(stores)]
+        for result in results:
+            result.result(timeout=10)
+
+    assert len(temporary_paths) == 2
+    assert len(set(temporary_paths)) == 2
+    assert all(not path.exists() for path in temporary_paths)

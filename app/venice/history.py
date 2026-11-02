@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,6 +79,15 @@ class VeniceHistoryStore:
         with self._lock:
             rows = [safe, *self.list()]
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-            temporary.write_text(json.dumps(rows[:100], ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(temporary, self.path)
+            temporary: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=self.path.parent,
+                    prefix=f"{self.path.name}.", suffix=".tmp", delete=False,
+                ) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(json.dumps(rows[:100], ensure_ascii=False, indent=2))
+                os.replace(temporary, self.path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
