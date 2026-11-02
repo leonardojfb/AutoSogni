@@ -14,6 +14,14 @@ from app.utils.paths import data_dir
 
 _PARAMETER_KEYS = ("aspect_ratio", "resolution", "output_format", "safe_mode", "seed")
 _RECORD_KEYS = ("provider", "model_id", "request_id", "created_at", "references", "parameters")
+_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for_path(path: Path) -> threading.Lock:
+    key = os.path.normcase(str(path.resolve()))
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(key, threading.Lock())
 
 
 def sanitize_history_record(record: dict[str, object]) -> dict[str, object]:
@@ -62,7 +70,7 @@ def _looks_sensitive(value: object) -> bool:
 class VeniceHistoryStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path or data_dir() / "venice_history.json")
-        self._lock = threading.Lock()
+        self._lock = _lock_for_path(self.path)
 
     def list(self) -> list[dict[str, object]]:
         try:

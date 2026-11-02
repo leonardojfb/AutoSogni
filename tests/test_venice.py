@@ -358,28 +358,54 @@ def test_sanitize_history_record_whitelists_nested_metadata():
     assert "private" not in encoded and "secret" not in encoded and "base64" not in encoded
 
 
-def test_venice_history_concurrent_stores_use_unique_temporary_files(tmp_path, monkeypatch):
+def test_venice_history_distinct_stores_use_unique_temporary_files(tmp_path, monkeypatch):
     from app.venice import history as history_module
 
     destination = tmp_path / "venice_history.json"
     stores = [VeniceHistoryStore(destination), VeniceHistoryStore(destination)]
-    barrier = threading.Barrier(2)
-    replace_lock = threading.Lock()
     temporary_paths = []
     actual_replace = history_module.os.replace
 
-    def synchronized_replace(source, target):
+    def capture_replace(source, target):
         temporary_paths.append(Path(source))
-        barrier.wait(timeout=5)
-        with replace_lock:
-            actual_replace(source, target)
+        actual_replace(source, target)
 
-    monkeypatch.setattr(history_module.os, "replace", synchronized_replace)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = [pool.submit(store.add, {"request_id": str(index)}) for index, store in enumerate(stores)]
-        for result in results:
-            result.result(timeout=10)
+    monkeypatch.setattr(history_module.os, "replace", capture_replace)
+    for index, store in enumerate(stores):
+        store.add({"request_id": str(index)})
 
     assert len(temporary_paths) == 2
     assert len(set(temporary_paths)) == 2
     assert all(not path.exists() for path in temporary_paths)
+
+
+def test_venice_history_overlapping_adds_from_separate_stores_preserve_both_records(tmp_path, monkeypatch):
+    from app.venice import history as history_module
+
+    destination = tmp_path / "venice_history.json"
+    first_store = VeniceHistoryStore(destination)
+    second_store = VeniceHistoryStore(destination)
+    first_store.add({"request_id": "existing"})
+    first_is_replacing = threading.Event()
+    second_replaced = threading.Event()
+    actual_replace = history_module.os.replace
+
+    def controlled_replace(source, target):
+        contents = Path(source).read_text(encoding="utf-8")
+        if '"request_id": "first"' in contents:
+            first_is_replacing.set()
+            second_replaced.wait(timeout=0.5)
+            actual_replace(source, target)
+        else:
+            actual_replace(source, target)
+            second_replaced.set()
+
+    monkeypatch.setattr(history_module.os, "replace", controlled_replace)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(first_store.add, {"request_id": "first"})
+        assert first_is_replacing.wait(timeout=5)
+        second = pool.submit(second_store.add, {"request_id": "second"})
+        first.result(timeout=10)
+        second.result(timeout=10)
+
+    assert {record["request_id"] for record in first_store.list()} == {"existing", "first", "second"}
