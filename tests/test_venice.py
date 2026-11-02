@@ -1,7 +1,11 @@
+import json
 from pathlib import Path
 
+import httpx
 import pytest
 
+from app.sogni.auth import ApiKeyStore
+from app.venice.client import VeniceApiError, VeniceClient
 from app.venice.validation import (
     ModelProfile,
     REQUESTED_MODEL_IDS,
@@ -49,6 +53,113 @@ def _profile(model_id="qwen-image-2-1-pro-edit", **overrides):
                   aspect_ratios=("auto", "1:1"), default_resolution="1K")
     values.update(overrides)
     return ModelProfile(**values)
+
+
+def test_catalog_request_uses_venice_base_url_and_bearer_header():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json=_catalog())
+
+    client = VeniceClient("secret", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    profiles = client.list_edit_models()
+    assert str(seen[0].url) == "https://api.venice.ai/api/v1/models?type=inpaint"
+    assert seen[0].headers["Authorization"] == "Bearer secret"
+    assert tuple(profiles) == REQUESTED_MODEL_IDS
+    assert profiles["qwen-image-2-1-pro-edit"] == parse_model_catalog(_catalog())["qwen-image-2-1-pro-edit"]
+
+
+def test_multi_edit_returns_binary_result_without_rewriting_payload():
+    payload = {"modelId": "qwen-image-2-1-pro-edit", "prompt": "Exact", "images": ["a", "b"]}
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        assert str(request.url) == "https://api.venice.ai/api/v1/image/multi-edit"
+        assert json.loads(request.content) == payload
+        assert request.headers["Authorization"] == "Bearer secret"
+        return httpx.Response(200, content=b"png-bytes", headers={
+            "content-type": "image/png", "x-request-id": "req-1"})
+
+    result = VeniceClient("secret", client=httpx.Client(transport=httpx.MockTransport(handler))).multi_edit(payload)
+    assert len(seen) == 1
+    assert result.content == b"png-bytes"
+    assert result.content_type == "image/png"
+    assert result.request_id == "req-1"
+    assert result.headers["x-request-id"] == "req-1"
+    assert "secret" not in repr(result)
+
+
+def test_multi_edit_redacts_key_if_provider_echoes_it_in_response_header():
+    transport = httpx.MockTransport(lambda request: httpx.Response(
+        200, content=b"image", headers={"content-type": "image/png", "x-debug": "Bearer secret"}))
+    result = VeniceClient("secret", client=httpx.Client(transport=transport)).multi_edit({})
+    assert "secret" not in repr(result)
+    assert result.headers["x-debug"] == "Bearer [redacted]"
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 413, 415, 422, 429, 500, 503])
+def test_multi_edit_translates_http_errors_without_leaking_key_or_payload(status):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status, json={"error": {"code": "bad_request", "message": "secret invalid image"}})
+
+    client = VeniceClient("secret", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(VeniceApiError) as caught:
+        client.multi_edit({"images": ["private-base64"]})
+    assert len(calls) == 1
+    assert caught.value.status_code == status
+    assert str(status) in str(caught.value)
+    assert "secret" not in str(caught.value)
+    assert "private-base64" not in str(caught.value)
+
+
+def test_multi_edit_translates_timeout_without_retry():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        raise httpx.ReadTimeout("secret timeout", request=request)
+
+    client = VeniceClient("secret", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(VeniceApiError) as caught:
+        client.multi_edit({"images": ["private-base64"]})
+    assert len(calls) == 1
+    assert caught.value.status_code is None
+    assert "timed out" in str(caught.value).lower()
+    assert "secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("content_type", ["image/png", "image/jpeg", "image/webp"])
+def test_multi_edit_accepts_supported_binary_types(content_type):
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b"image", headers={"content-type": content_type}))
+    result = VeniceClient(client=httpx.Client(transport=transport)).multi_edit({})
+    assert result.content_type == content_type
+    assert result.content == b"image"
+    assert result.request_id == ""
+
+
+def test_multi_edit_rejects_non_image_success_response():
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"error": "private-base64"}))
+    with pytest.raises(VeniceApiError, match="content type") as caught:
+        VeniceClient(client=httpx.Client(transport=transport)).multi_edit({})
+    assert caught.value.status_code == 200
+    assert "private-base64" not in str(caught.value)
+
+
+def test_venice_key_store_reads_only_its_configured_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("SOGNI_API_KEY", "sogni-secret")
+    monkeypatch.delenv("VENICE_API_KEY", raising=False)
+    store = ApiKeyStore(tmp_path / "venice_api_key.txt", env_name="VENICE_API_KEY")
+    assert store.get() == ""
+    store.save("file-secret")
+    assert store.get() == "file-secret"
+    monkeypatch.setenv("VENICE_API_KEY", "venice-secret")
+    assert store.get() == "venice-secret"
+    assert ApiKeyStore(tmp_path / "missing.txt").get() == "sogni-secret"
 
 
 def test_parse_model_catalog_keeps_only_requested_edit_models():
