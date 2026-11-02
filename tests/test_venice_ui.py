@@ -262,6 +262,49 @@ def test_save_failure_retains_paid_response_for_local_save_without_second_reques
     widget.close()
 
 
+def test_received_image_can_be_saved_after_catalog_becomes_empty(tmp_path, monkeypatch):
+    release = threading.Event()
+    output = _image(tmp_path / "sample.png").read_bytes()
+    client = FakeVeniceClient(block=release,
+                              result=VeniceImageResult(output, "image/png", "req-1", {}))
+    widget = _widget(tmp_path, client)
+    widget.set_reference_path(0, _image(tmp_path / "scene.png"))
+    widget.prompt_edit.setPlainText("original prompt")
+    original_save = venice_ui.save_venice_output
+    attempts = []
+
+    def fail_once(result, directory):
+        attempts.append(Path(directory))
+        if len(attempts) == 1:
+            raise OSError("local save failed")
+        return original_save(result, directory)
+
+    monkeypatch.setattr(venice_ui, "save_venice_output", fail_once)
+    widget.generate_button.click()
+    try:
+        _wait_until(client.started.is_set)
+        client.profiles = {}
+        widget.refresh_button.click()
+        _wait_until(lambda: not widget._catalog_active)
+        assert widget.model_combo.count() == 0
+    finally:
+        release.set()
+    _wait_until(lambda: not widget._request_active)
+    assert widget.generate_button.text() == "Save received image"
+    assert widget.generate_button.isEnabled()
+    widget.refresh_button.click()
+    _wait_until(lambda: not widget._catalog_active)
+    assert widget.generate_button.isEnabled()
+    widget.output_dir = tmp_path / "writable"
+    widget.generate_button.click()
+    _wait_until(lambda: not widget._request_active)
+    assert len(client.calls) == 1
+    assert list(widget.output_dir.glob("*.png"))[0].read_bytes() == output
+    assert widget.history_table.item(0, 2).text() == "original prompt"
+    assert not widget.generate_button.isEnabled()
+    widget.close()
+
+
 def test_saved_non_previewable_image_reports_preview_failure(tmp_path):
     client = FakeVeniceClient(result=VeniceImageResult(b"not-a-png", "image/png", "req", {}))
     widget = _widget(tmp_path, client)

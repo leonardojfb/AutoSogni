@@ -209,7 +209,8 @@ class VeniceEditWidget(QWidget):
         if selected:
             self.model_combo.setCurrentIndex(self.model_combo.findData(selected))
         self._update_model_options()
-        self.generate_button.setEnabled(bool(self._profiles) and not self._request_active)
+        self.generate_button.setEnabled(
+            (bool(self._profiles) or self._pending_result is not None) and not self._request_active)
         self.status_label.setText("Venice models ready." if self._profiles else "No requested Venice edit models are available.")
 
     def _update_model_options(self, *_args) -> None:
@@ -383,7 +384,7 @@ class VeniceEditWidget(QWidget):
             self.status_label.setText("Venice output was saved, but history or preview could not be updated.")
         finally:
             self._request_active = False
-            self.generate_button.setEnabled(bool(self._profiles))
+            self.generate_button.setEnabled(bool(self._profiles) or self._pending_result is not None)
 
     def _load_history(self) -> None:
         for record in reversed(self.history_store.list()):
