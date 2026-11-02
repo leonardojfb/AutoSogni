@@ -13,7 +13,7 @@ REQUESTED_MODEL_IDS = (
     "seedream-v5-pro-edit",
     "flux-2-max-edit",
 )
-MAX_IMAGE_BYTES = 25 * 1024 * 1024
+MAX_IMAGE_BYTES = 25_000_000
 MAX_TOTAL_PIXELS = 33_177_600
 MIN_IMAGE_DIMENSION = 256
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}

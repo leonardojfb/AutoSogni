@@ -160,3 +160,20 @@ def test_validate_local_image_rejects_pixel_cap_and_25mb(tmp_path):
         stream.truncate(25 * 1024 * 1024)
     with pytest.raises(ValueError, match="25 MB"):
         validate_local_image(too_big)
+
+
+def test_validate_local_image_uses_decimal_25mb_boundary(tmp_path):
+    limit = 25_000_000
+    header = b"\x89PNG\r\n\x1a\n" + b"\0" * 8 + (256).to_bytes(4, "big") * 2
+    just_under = tmp_path / "just-under.png"
+    just_under.write_bytes(header)
+    with just_under.open("r+b") as stream:
+        stream.truncate(limit - 1)
+    assert validate_local_image(just_under).size_bytes == limit - 1
+
+    at_limit = tmp_path / "at-limit.png"
+    at_limit.write_bytes(header)
+    with at_limit.open("r+b") as stream:
+        stream.truncate(limit)
+    with pytest.raises(ValueError, match="25 MB"):
+        validate_local_image(at_limit)
