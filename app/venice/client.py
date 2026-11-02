@@ -37,16 +37,19 @@ class VeniceClient:
         return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
 
     def _request(self, method: str, path: str, *, payload: dict[str, object] | None = None) -> httpx.Response:
+        failure: VeniceApiError | None = None
         try:
             response = self._client.request(
                 method, f"{self.BASE_URL}{path}", headers=self._headers(),
                 **({"json": payload} if payload is not None else {}),
                 timeout=self.timeout,
             )
-        except httpx.TimeoutException as exc:
-            raise VeniceApiError("Venice request timed out.") from exc
-        except httpx.RequestError as exc:
-            raise VeniceApiError("Venice network request failed.") from exc
+        except httpx.TimeoutException:
+            failure = VeniceApiError("Venice request timed out.")
+        except httpx.RequestError:
+            failure = VeniceApiError("Venice network request failed.")
+        if failure is not None:
+            raise failure
         if response.is_error:
             provider_error = self._provider_error(response, payload)
             detail = f" ({provider_error})" if provider_error else ""

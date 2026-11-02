@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import traceback
 
 import httpx
 import pytest
@@ -131,6 +132,24 @@ def test_multi_edit_translates_timeout_without_retry():
     assert caught.value.status_code is None
     assert "timed out" in str(caught.value).lower()
     assert "secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ConnectError])
+def test_network_error_traceback_does_not_expose_api_key(error_type):
+    api_key = "venice-private-key-123"
+
+    def handler(request):
+        raise error_type(api_key, request=request)
+
+    client = VeniceClient(api_key, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    payload = {"images": ["private-base64"]}
+    with pytest.raises(VeniceApiError) as caught:
+        client.multi_edit(payload)
+    formatted = "".join(traceback.format_exception(caught.value))
+    assert api_key not in formatted
+    assert "private-base64" not in formatted
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 @pytest.mark.parametrize("content_type", ["image/png", "image/jpeg", "image/webp"])
