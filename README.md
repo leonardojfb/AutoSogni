@@ -80,6 +80,17 @@ automatically the first time this feature is opened. Each campaign can run in
 `Paralelo` mode, which submits all pending jobs first and polls their results
 concurrently.
 
+## Venice
+
+Open the root `Venice` tab. Enter a Venice API key there or set
+`VENICE_API_KEY`, then click `Refresh models` to load the verified edit-model
+catalog. Add 1–3 reference images in the order they should be sent, enter a
+prompt, and click `Generate` to use the synchronous Venice image-edit endpoint.
+Saved images go to the selected output folder (by default,
+`data/venice_outputs`), and sanitized local history is kept in
+`data/venice_history.json`. The key saved from this tab is stored separately in
+`data/venice_api_key.txt`. Tests do not perform paid image generation.
+
 ## Sogni API Notes
 
 The integration uses the current Sogni docs as of 2026-09-14:

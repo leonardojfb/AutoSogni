@@ -20,6 +20,9 @@ from app.utils.paths import data_dir
 from app.wavespeed.client import WaveSpeedClient
 from app.byteplus.client import BytePlusClient
 from app.byteplus.history import BytePlusHistoryStore
+from app.venice.client import VeniceClient
+from app.venice.history import VeniceHistoryStore
+from app.ui.venice import VeniceEditWidget
 from app.byteplus.https_uploads import HTTPSUploader
 from app.byteplus.pricing import estimate_cost
 from app.byteplus.queue import BytePlusCampaign, BytePlusCampaignStore, BytePlusQueueItem, QueueStatus
@@ -112,6 +115,9 @@ class MainWindow(QMainWindow):
         byteplus_client=None,
         byteplus_key_store=None,
         byteplus_campaign_store=None,
+        venice_client=None,
+        venice_key_store=None,
+        venice_history_store=None,
     ) -> None:
         super().__init__()
         self.repo = repo
@@ -127,6 +133,11 @@ class MainWindow(QMainWindow):
         self.byteplus = byteplus_client or BytePlusClient(self.byteplus_key_store.get())
         self.byteplus_history = BytePlusHistoryStore()
         self.byteplus_campaign_store = byteplus_campaign_store or BytePlusCampaignStore()
+        self.venice_key_store = venice_key_store or ApiKeyStore(
+            data_dir() / "venice_api_key.txt", env_name="VENICE_API_KEY"
+        )
+        self.venice = venice_client or VeniceClient(self.venice_key_store.get())
+        self.venice_history_store = venice_history_store or VeniceHistoryStore()
         self._byteplus_campaign_id = None
         self._flux_campaign_id: str | None = None
         self._flux_campaign_name = "Nueva campaña Flux"
@@ -176,6 +187,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._wavespeed_tab(), "WaveSpeed")
         self.tabs.addTab(self._byteplus_tab(), "BytePlus")
         self.tabs.addTab(self._images_tab(), "Imágenes")
+        self.venice_tab = VeniceEditWidget(self.venice, self.venice_key_store, self.venice_history_store)
+        self.tabs.addTab(self.venice_tab, "Venice")
         layout.addWidget(self.tabs)
         self.setCentralWidget(root)
 

@@ -77,6 +77,39 @@ def _widget(tmp_path, client):
     return widget
 
 
+def test_main_window_registers_venice_with_separate_default_key_store(tmp_path, monkeypatch):
+    from app.database.db import Database
+    from app.database.repositories import CampaignRepository
+    from app.sogni.client import SogniClient
+    from app.ui import main_window as main_window_ui
+
+    _app()
+    monkeypatch.setattr(main_window_ui, "data_dir", lambda: tmp_path)
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    client = FakeVeniceClient()
+    window = main_window_ui.MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "sogni_api_key.txt"),
+        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed_api_key.txt"),
+        byteplus_key_store=ApiKeyStore(tmp_path / "byteplus_api_key.txt"),
+        venice_client=client,
+    )
+    try:
+        labels = [window.tabs.tabText(index) for index in range(window.tabs.count())]
+        assert {"WaveSpeed", "BytePlus", "Imágenes", "Venice"} <= set(labels)
+        assert window.tabs.widget(labels.index("Venice")) is window.venice_tab
+        assert isinstance(window.venice_tab, VeniceEditWidget)
+        assert window.venice_key_store.path == tmp_path / "venice_api_key.txt"
+        assert window.venice_key_store.env_name == "VENICE_API_KEY"
+        assert window.venice_tab.key_store.path == window.venice_key_store.path
+        assert window.venice_key_store.path not in {
+            window.key_store.path, window.wavespeed_key_store.path, window.byteplus_key_store.path,
+        }
+        assert isinstance(window.venice_tab.history_store, VeniceHistoryStore)
+    finally:
+        window.close()
+
+
 def test_venice_slots_preserve_visible_order_after_reorder(tmp_path):
     widget = _widget(tmp_path, FakeVeniceClient())
     scene, face, body = (_image(tmp_path / f"{name}.png") for name in ("scene", "face", "body"))
