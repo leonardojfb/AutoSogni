@@ -368,9 +368,11 @@ class VeniceEditWidget(QWidget):
             record = {
                 "provider": "Venice", "model_id": snapshot["profile"].id,
                 "request_id": request_id,
+                "prompt": snapshot["prompt"],
                 "references": [{"slot": index + 1, "filename": path.name}
                                for index, path in enumerate(paths)],
                 "parameters": dict(snapshot["options"]),
+                "output_file": output_path.name,
             }
             self.history_store.add(record)
             self._insert_history_row(datetime.now(timezone.utc).isoformat(),

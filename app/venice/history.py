@@ -13,7 +13,7 @@ from app.utils.paths import data_dir
 
 
 _PARAMETER_KEYS = ("aspect_ratio", "resolution", "output_format", "safe_mode", "seed")
-_RECORD_KEYS = ("provider", "model_id", "request_id", "created_at", "references", "parameters")
+_RECORD_KEYS = ("provider", "model_id", "request_id", "created_at", "prompt", "references", "parameters", "output_file")
 _PATH_LOCKS: dict[str, threading.Lock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 
@@ -25,12 +25,22 @@ def _lock_for_path(path: Path) -> threading.Lock:
 
 
 def sanitize_history_record(record: dict[str, object]) -> dict[str, object]:
-    """Copy only explicitly approved, non-prompt edit metadata into history."""
+    """Copy approved edit metadata while excluding secrets and source paths."""
     safe: dict[str, object] = {}
     for key in ("provider", "model_id", "request_id", "created_at"):
         value = record.get(key)
         if isinstance(value, str) and value and not _looks_sensitive(value):
             safe[key] = value[:200]
+
+    prompt = record.get("prompt")
+    if isinstance(prompt, str) and prompt:
+        safe["prompt"] = prompt[:32768]
+
+    output_file = record.get("output_file")
+    if isinstance(output_file, str) and output_file:
+        filename = Path(output_file).name
+        if filename and filename not in {".", ".."} and not _looks_sensitive(filename):
+            safe["output_file"] = filename[:255]
 
     references = record.get("references")
     if isinstance(references, list):

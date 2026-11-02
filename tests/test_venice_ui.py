@@ -254,7 +254,9 @@ def test_binary_response_saved_previewed_and_history_sanitized(tmp_path):
     disk = (tmp_path / "history.json").read_text(encoding="utf-8")
     assert '"slot": 1' in disk and '"slot": 2' in disk
     assert base64.b64encode(output).decode("ascii") not in disk
-    assert "secret prompt" not in disk and str(files[0]) not in disk
+    assert '"prompt": "secret prompt"' in disk
+    assert f'"output_file": "{files[0].name}"' in disk
+    assert str(files[0]) not in disk
     widget.close()
 
 

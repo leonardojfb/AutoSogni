@@ -326,7 +326,8 @@ def test_venice_history_redacts_secrets_prompt_and_source_paths(tmp_path):
     record = store.list()[0]
     encoded = json.dumps(record)
     assert "secret" not in encoded and "Bearer" not in encoded
-    assert "a" * 100 not in encoded and "Keep exact" not in encoded
+    assert "a" * 100 not in encoded and record["prompt"] == "Keep exact"
+    assert record["output_file"] == "out.png"
     assert str(tmp_path) not in encoded
     assert record["references"] == [{"slot": 1, "filename": "scene.png"}, {"slot": 2, "filename": "face.png"}]
     assert record["parameters"] == {"aspect_ratio": "1:1", "resolution": "2K", "output_format": "png"}
@@ -355,7 +356,8 @@ def test_sanitize_history_record_whitelists_nested_metadata():
     encoded = json.dumps(record)
     assert record["references"] == [{"slot": 2, "filename": "face.png"}]
     assert record["parameters"] == {"safe_mode": True, "seed": 42}
-    assert "private" not in encoded and "secret" not in encoded and "base64" not in encoded
+    assert record["prompt"] == "private"
+    assert "secret" not in encoded and "base64" not in encoded
 
 
 def test_venice_history_distinct_stores_use_unique_temporary_files(tmp_path, monkeypatch):
