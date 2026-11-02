@@ -1,0 +1,211 @@
+"""Offscreen tests for the standalone Venice editor."""
+
+from __future__ import annotations
+
+import base64
+import threading
+import time
+from pathlib import Path
+
+from PySide6.QtGui import QImage
+from PySide6.QtWidgets import QApplication, QLineEdit
+
+from app.sogni.auth import ApiKeyStore
+from app.ui.venice import VeniceEditWidget
+from app.venice.client import VeniceApiError, VeniceImageResult
+from app.venice.history import VeniceHistoryStore
+from app.venice.validation import ModelProfile
+
+
+QWEN = "qwen-image-2-1-pro-edit"
+FLUX = "flux-2-max-edit"
+
+
+def _app():
+    return QApplication.instance() or QApplication([])
+
+
+def _wait_until(predicate, timeout=3):
+    limit = time.monotonic() + timeout
+    while time.monotonic() < limit:
+        _app().processEvents()
+        if predicate():
+            return
+        time.sleep(0.01)
+    assert predicate(), "timed out waiting for worker signal"
+
+
+def _image(path: Path) -> Path:
+    assert QImage(256, 256, QImage.Format_RGB32).save(str(path), "PNG")
+    return path
+
+
+def _profile(model_id=QWEN, *, resolutions=("1K", "2K"), ratios=("auto", "1:1")):
+    return ModelProfile(model_id, "Qwen Image 2.1 Pro" if model_id == QWEN else "FLUX 2 Max",
+                        3, 1000, resolutions, ratios, resolutions[0] if resolutions else "")
+
+
+class FakeVeniceClient:
+    def __init__(self, profiles=None, *, result=None, error=None, block=None):
+        self.profiles = profiles if profiles is not None else {QWEN: _profile()}
+        self.result = result
+        self.error = error
+        self.block = block
+        self.api_key = ""
+        self.calls = []
+        self.started = threading.Event()
+
+    def list_edit_models(self):
+        return self.profiles
+
+    def multi_edit(self, payload):
+        self.calls.append(payload)
+        self.started.set()
+        if self.block is not None:
+            assert self.block.wait(3)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def _widget(tmp_path, client):
+    _app()
+    widget = VeniceEditWidget(client, ApiKeyStore(tmp_path / "key.txt"),
+                              VeniceHistoryStore(tmp_path / "history.json"))
+    _wait_until(lambda: not widget._catalog_active)
+    return widget
+
+
+def test_venice_slots_preserve_visible_order_after_reorder(tmp_path):
+    widget = _widget(tmp_path, FakeVeniceClient())
+    scene, face, body = (_image(tmp_path / f"{name}.png") for name in ("scene", "face", "body"))
+    widget.set_reference_path(0, scene)
+    widget.set_reference_path(1, face)
+    widget.set_reference_path(2, body)
+    widget.move_reference(2, -1)
+    widget.prompt_edit.setPlainText("  literal prompt\n")
+    assert widget._ordered_reference_paths() == [scene, body, face]
+    assert [widget.layout().itemAt(i).layout().itemAt(1).widget().text() for i in (5, 6, 7)] == [
+        "scene.png", "body.png", "face.png"]
+    snapshot = widget._build_request_snapshot()
+    payload = widget._build_payload_from_snapshot(snapshot)
+    assert payload["images"] == [base64.b64encode(path.read_bytes()).decode("ascii")
+                                 for path in (scene, body, face)]
+    assert payload["prompt"] == "  literal prompt\n"
+    widget.close()
+
+
+def test_snapshot_is_not_changed_by_later_control_edits(tmp_path):
+    widget = _widget(tmp_path, FakeVeniceClient())
+    scene = _image(tmp_path / "scene.png")
+    face = _image(tmp_path / "face.png")
+    widget.set_reference_path(0, scene)
+    widget.set_reference_path(1, face)
+    widget.prompt_edit.setPlainText("original")
+    snapshot = widget._build_request_snapshot()
+    widget.move_reference(1, -1)
+    widget.prompt_edit.setPlainText("changed")
+    widget.output_format_combo.setCurrentText("webp")
+    assert snapshot["reference_paths"] == [scene, face]
+    assert snapshot["options"]["output_format"] == "png"
+    assert widget._build_payload_from_snapshot(snapshot)["prompt"] == "original"
+    widget.close()
+
+
+def test_catalog_offers_only_available_models_and_updates_options(tmp_path):
+    client = FakeVeniceClient({FLUX: _profile(FLUX, resolutions=(), ratios=("auto",)),
+                               QWEN: _profile()})
+    widget = _widget(tmp_path, client)
+    assert widget.model_combo.currentData() == QWEN
+    assert [widget.model_combo.itemData(i) for i in range(widget.model_combo.count())] == [QWEN, FLUX]
+    assert widget.resolution_combo.isEnabled()
+    assert [widget.resolution_combo.itemText(i) for i in range(widget.resolution_combo.count())] == ["1K", "2K"]
+    widget.model_combo.setCurrentIndex(widget.model_combo.findData(FLUX))
+    assert not widget.resolution_combo.isEnabled()
+    assert [widget.aspect_combo.itemText(i) for i in range(widget.aspect_combo.count())] == ["auto"]
+    widget.close()
+
+
+def test_catalog_failure_does_not_select_qwen_or_offer_unavailable_models(tmp_path):
+    client = FakeVeniceClient({FLUX: _profile(FLUX, resolutions=())})
+    widget = _widget(tmp_path, client)
+    assert widget.model_combo.currentData() == FLUX
+    assert widget.model_combo.findData(QWEN) == -1
+    widget.close()
+
+
+def test_empty_catalog_keeps_generation_disabled(tmp_path):
+    widget = _widget(tmp_path, FakeVeniceClient({}))
+    assert widget.model_combo.count() == 0
+    assert not widget.generate_button.isEnabled()
+    widget.close()
+
+
+def test_key_field_uses_venice_environment_and_password_echo(tmp_path, monkeypatch):
+    monkeypatch.setenv("VENICE_API_KEY", "venice-only")
+    monkeypatch.setenv("SOGNI_API_KEY", "sogni-only")
+    client = FakeVeniceClient()
+    widget = _widget(tmp_path, client)
+    assert widget.key_edit.echoMode() == QLineEdit.Password
+    assert widget.key_edit.text() == "venice-only"
+    assert client.api_key == "venice-only"
+    widget.close()
+
+
+def test_duplicate_click_starts_only_one_request(tmp_path):
+    release = threading.Event()
+    client = FakeVeniceClient(block=release, result=VeniceImageResult(b"bad", "image/png", "req", {}))
+    widget = _widget(tmp_path, client)
+    widget.set_reference_path(0, _image(tmp_path / "scene.png"))
+    widget.prompt_edit.setPlainText("edit")
+    try:
+        widget.generate_button.click()
+        _wait_until(client.started.is_set)
+        widget.generate_button.click()
+        assert len(client.calls) == 1
+        assert not widget.generate_button.isEnabled()
+    finally:
+        release.set()
+        _wait_until(lambda: not widget._request_active)
+        widget.close()
+
+
+def test_binary_response_saved_previewed_and_history_sanitized(tmp_path):
+    output = _image(tmp_path / "sample.png").read_bytes()
+    client = FakeVeniceClient(result=VeniceImageResult(output, "image/png", "req-1", {}))
+    widget = _widget(tmp_path, client)
+    scene = _image(tmp_path / "scene.png")
+    face = _image(tmp_path / "face.png")
+    widget.set_reference_path(0, scene)
+    widget.set_reference_path(1, face)
+    widget.prompt_edit.setPlainText("secret prompt")
+    widget.output_dir = tmp_path / "outputs"
+    widget.generate_button.click()
+    _wait_until(lambda: not widget._request_active)
+    files = list(widget.output_dir.glob("*.png"))
+    assert len(files) == 1 and files[0].read_bytes() == output
+    assert not widget.preview_label.pixmap().isNull()
+    assert widget.history_table.rowCount() == 1
+    assert widget.history_table.item(0, 1).text() == QWEN
+    assert widget.history_table.item(0, 2).text() == "secret prompt"
+    assert widget.history_table.item(0, 3).text() == "scene.png, face.png"
+    assert widget.history_table.item(0, 4).text() == str(files[0])
+    disk = (tmp_path / "history.json").read_text(encoding="utf-8")
+    assert '"slot": 1' in disk and '"slot": 2' in disk
+    assert base64.b64encode(output).decode("ascii") not in disk
+    assert "secret prompt" not in disk and str(files[0]) not in disk
+    widget.close()
+
+
+def test_provider_error_preserves_controls_and_shows_sanitized_message(tmp_path):
+    client = FakeVeniceClient(error=VeniceApiError("Venice API returned HTTP 429."))
+    widget = _widget(tmp_path, client)
+    scene = _image(tmp_path / "scene.png")
+    widget.set_reference_path(0, scene)
+    widget.prompt_edit.setPlainText("keep this prompt")
+    widget.generate_button.click()
+    _wait_until(lambda: not widget._request_active)
+    assert widget.prompt_edit.toPlainText() == "keep this prompt"
+    assert widget._ordered_reference_paths() == [scene]
+    assert widget.status_label.text() == "Venice API returned HTTP 429."
+    widget.close()
