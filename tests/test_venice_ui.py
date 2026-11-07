@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import base64
+import json
 import threading
 import time
 from pathlib import Path
 
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication, QLineEdit
+from PySide6.QtWidgets import QApplication, QLineEdit, QMainWindow
 
 from app.sogni.auth import ApiKeyStore
 from app.ui import venice as venice_ui
@@ -376,6 +377,7 @@ def test_venice_has_editable_batch_page_and_one_click_snapshot(tmp_path, monkeyp
     batch = widget.batch_tab
     assert [widget.pages.tabText(i) for i in range(widget.pages.count())] == ["Single image", "Batch"]
     assert batch.master_prompt_edit.isReadOnly() is False
+    assert batch.vision_model_edit.text() == "deepseek-v4-1-flash-uncensored"
 
     source_dir = tmp_path / "sources"
     source_dir.mkdir()
@@ -521,4 +523,57 @@ def test_batch_preflight_error_does_not_expose_reference_path(tmp_path):
     _wait_until(lambda: not batch._active)
     assert str(tmp_path) not in batch.status_label.text()
     assert "image" in batch.status_label.text().lower()
+    widget.close()
+
+
+def test_closing_parent_window_waits_for_active_batch_to_stop(tmp_path, monkeypatch):
+    client = FakeVeniceClient()
+    widget = _widget(tmp_path, client)
+    window = QMainWindow()
+    window.setCentralWidget(widget)
+    window.show()
+    _app().processEvents()
+    batch = widget.batch_tab
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    _image(source_dir / "photo.jpg")
+    batch.source_dir_edit.setText(str(source_dir))
+    batch.output_parent_edit.setText(str(tmp_path / "outputs"))
+    batch.face_path_edit.setText(str(_image(tmp_path / "face.png")))
+    batch.body_path_edit.setText(str(_image(tmp_path / "body.png")))
+    batch.master_prompt_edit.setPlainText("master")
+    started = threading.Event()
+    release = threading.Event()
+    observed = []
+
+    def fake_run(client_arg, profile, config, progress=None, stop_event=None):
+        observed.append(stop_event)
+        started.set()
+        assert release.wait(3)
+        return tmp_path / "run"
+
+    monkeypatch.setattr(venice_batch_ui, "run_batch", fake_run)
+    batch.process_button.click()
+    _wait_until(started.is_set)
+    window.close()
+    _app().processEvents()
+    assert observed[0].is_set()
+    assert window.isVisible()
+    release.set()
+    _wait_until(lambda: not batch._active)
+    _wait_until(lambda: not window.isVisible())
+
+
+def test_batch_completion_reports_failed_and_stopped_items(tmp_path):
+    widget = _widget(tmp_path, FakeVeniceClient())
+    batch = widget.batch_tab
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "manifest.json").write_text(json.dumps({"items": [
+        {"status": "failed"}, {"status": "stopped"}, {"status": "completed"},
+    ]}), encoding="utf-8")
+    batch._on_complete(run_dir, None)
+    assert "1 completed" in batch.status_label.text()
+    assert "1 failed" in batch.status_label.text()
+    assert "1 stopped" in batch.status_label.text()
     widget.close()

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import threading
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
@@ -49,6 +50,8 @@ class VeniceBatchWidget(QWidget):
         self._active = False
         self._stop_event: threading.Event | None = None
         self._thread: threading.Thread | None = None
+        self._close_target: QWidget | None = None
+        self._close_when_done = False
         self._events = _BatchEvents(self)
         self._events.progress.connect(self._on_progress)
         self._events.completed.connect(self._on_complete)
@@ -64,7 +67,7 @@ class VeniceBatchWidget(QWidget):
         self.body_path_edit = QLineEdit()
         form.addRow("Body reference (2)", self._with_button(self.body_path_edit, self._choose_body))
         self.vision_model_edit = QLineEdit(DEFAULT_VISION_MODEL)
-        form.addRow("Vision model", self.vision_model_edit)
+        form.addRow("Prompt model (vision)", self.vision_model_edit)
         root.addLayout(form)
 
         master_row = QHBoxLayout()
@@ -190,6 +193,10 @@ class VeniceBatchWidget(QWidget):
         self._active = True
         self._stop_event = threading.Event()
         self._active_config = config
+        top_level = self.window()
+        if top_level is not self:
+            self._close_target = top_level
+            top_level.installEventFilter(self)
         self.active_changed.emit(True)
         self.progress_table.setRowCount(0)
         self.prompt_preview.clear()
@@ -221,6 +228,14 @@ class VeniceBatchWidget(QWidget):
             self._stop_event.set()
             self.stop_button.setEnabled(False)
             self.status_label.setText("Stop requested; finishing the current photo…")
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self._close_target and event.type() == QEvent.Type.Close and self._active:
+            self._close_when_done = True
+            self.stop()
+            event.ignore()
+            return True
+        return super().eventFilter(watched, event)
 
     def _on_progress(self, event: BatchEvent) -> None:
         if self._closed:
@@ -261,6 +276,9 @@ class VeniceBatchWidget(QWidget):
     def _on_complete(self, output_dir: object, error: object) -> None:
         if self._closed:
             return
+        close_target = self._detach_close_filter()
+        close_when_done = self._close_when_done
+        self._close_when_done = False
         self._active = False
         self._thread = None
         self._stop_event = None
@@ -270,9 +288,33 @@ class VeniceBatchWidget(QWidget):
         if error is not None:
             self.status_label.setText(self._error_message(error))
             self.output_folder_label.setText("Output folder: —")
-            return
-        self.output_folder_label.setText(f"Output folder: {output_dir}")
-        self.status_label.setText("Venice batch finished.")
+        else:
+            self.output_folder_label.setText(f"Output folder: {output_dir}")
+            self.status_label.setText(self._run_summary(Path(output_dir)))
+        if close_when_done and close_target is not None:
+            QTimer.singleShot(0, close_target.close)
+
+    def _detach_close_filter(self) -> QWidget | None:
+        target = self._close_target
+        self._close_target = None
+        if target is not None:
+            target.removeEventFilter(self)
+        return target
+
+    @staticmethod
+    def _run_summary(output_dir: Path) -> str:
+        try:
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            items = manifest["items"]
+            if not isinstance(items, list):
+                raise ValueError("Invalid batch manifest")
+            completed = sum(item.get("status") == "completed" for item in items)
+            failed = sum(item.get("status") == "failed" for item in items)
+            stopped = sum(item.get("status") == "stopped" for item in items)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return "Venice batch ended; manifest unavailable."
+        state = "completed" if completed == len(items) else "ended"
+        return f"Venice batch {state}: {completed} completed, {failed} failed, {stopped} stopped."
 
     def closeEvent(self, event) -> None:
         self.shutdown()
@@ -285,6 +327,7 @@ class VeniceBatchWidget(QWidget):
         self.stop()
         self._active = False
         self.stop_button.setEnabled(False)
+        self._detach_close_filter()
 
     @staticmethod
     def _error_message(error: object) -> str:

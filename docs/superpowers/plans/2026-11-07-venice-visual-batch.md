@@ -44,7 +44,7 @@ Stage 1 request, using the same `VENICE_API_KEY` / `ApiKeyStore` already used by
 
 ```json
 {
-  "model": "qwen3-vl-235b-a22b",
+  "model": "deepseek-v4-1-flash-uncensored",
   "max_completion_tokens": 4096,
   "messages": [{
     "role": "user",
@@ -56,7 +56,7 @@ Stage 1 request, using the same `VENICE_API_KEY` / `ApiKeyStore` already used by
 }
 ```
 
-`qwen3-vl-235b-a22b` is the default **editable** vision model, not a guarantee of availability. Send exactly one source photo per vision call. Preserve the master prompt text, except for normal transport serialization. Support JPEG, PNG, and WebP MIME types. Reject empty text, missing `choices[0].message.content`, and `finish_reason == "length"`. Do not pass a truncated prompt to Qwen. Do not log the prompt, image Base64, key, or full HTTP body.
+`deepseek-v4-1-flash-uncensored` is the default **editable** prompt model. The user's Venice catalog showed `supportsVision: true` on 2026-11-07; verify availability again when running. Send exactly one source photo per vision call. Preserve the master prompt text, except for normal transport serialization. Support JPEG, PNG, and WebP MIME types. Reject empty text, missing `choices[0].message.content`, and `finish_reason == "length"`. Do not pass a truncated prompt to Qwen. Do not log the prompt, image Base64, key, or full HTTP body.
 
 Stage 2 request must be built through existing `build_multi_edit_payload` and `VeniceClient.multi_edit`; it should be equivalent to:
 
@@ -78,7 +78,7 @@ Validate the prompt against the live Qwen profile's `prompt_character_limit` bef
 
 On each run, create one unique directory under the user-selected output parent, e.g. `venice_batch_20261107_143000_ab12cd34`. Do not put outputs in the source folder or overwrite an earlier run. Scan **only the immediate source directory**, sort supported extensions case-insensitively, and accept `.jpg`, `.jpeg`, `.png`, `.webp`. Ignore subfolders and unrelated files. Fail preflight if no supported photos are found or source and output parent resolve to the same directory.
 
-For each input, use a stable numeric prefix and sanitized source stem. Example: `0001_photo-name.prompt.txt` and `0001_photo-name.jpg`. If the provider returns another allowed image MIME type despite requesting JPEG, save with the matching extension; never label PNG bytes `.jpg`. Save prompt text immediately after successful stage 1, *before* stage 2. Write image bytes via a temporary file and atomic replace; remove temp files on failure. Do not copy source photos into the output directory.
+For each input, use a stable numeric prefix and sanitized source stem. Example: `0001_photo-name.prompt.txt` and `0001_photo-name.jpg`. Decode returned image bytes and verify their format matches the MIME type before recording success. If the provider returns another allowed image MIME type despite requesting JPEG, save with the matching extension; never label PNG bytes `.jpg`. Save prompt text immediately after successful stage 1, *before* stage 2. Write image bytes via a temporary file and atomic replace; remove temp files on failure. Do not copy source photos into the output directory.
 
 Write `manifest.json` atomically after preflight and after every state change. Use a concrete schema like:
 
@@ -86,7 +86,7 @@ Write `manifest.json` atomically after preflight and after every state change. U
 {
   "schema_version": 1,
   "created_at": "2026-11-07T17:30:00Z",
-  "vision_model": "qwen3-vl-235b-a22b",
+  "vision_model": "deepseek-v4-1-flash-uncensored",
   "edit_model": "qwen-image-2-1-pro-edit",
   "edit_options": {"resolution": "2K", "aspect_ratio": "auto", "output_format": "jpeg", "safe_mode": false},
   "master_prompt_sha256": "<hash>",
@@ -95,7 +95,7 @@ Write `manifest.json` atomically after preflight and after every state change. U
 }
 ```
 
-Keep filenames only in the manifest: no absolute paths, API key, headers, image Base64, or complete prompts. Prompt text belongs in each `.prompt.txt`. Use sanitized, short error messages. A photo-specific invalid image, vision error, or edit error marks that item failed and lets later photos continue. A 401, 402, or 429 from either Venice call stops the run so the same account/rate problem is not repeated for every photo. A timeout must **never trigger automatic retry**; the provider might have charged. A Stop click finishes the in-flight request, saves anything received, and prevents the next source photo.
+Keep filenames only in the manifest: no absolute paths, API key, headers, image Base64, or complete prompts. Prompt text belongs in each `.prompt.txt`. Use sanitized, short error messages. A photo-specific invalid image, vision error, or edit error marks that item failed and lets later photos continue. A 401, 402, or 429 from either Venice call stops the run so the same account/rate problem is not repeated for every photo. A timeout must **never trigger automatic retry**; the provider might have charged. A Stop click finishes the in-flight request, saves anything received, and prevents the next source photo. The final UI status reports completed, failed, and stopped counts. Closing the top-level window while active requests Stop and keeps the window open until the worker finishes.
 
 ### Runner sequence to preserve
 

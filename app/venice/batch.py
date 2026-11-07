@@ -6,12 +6,15 @@ import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
 import re
 import threading
 from uuid import uuid4
+
+from PIL import Image
 
 from app.venice.client import VeniceApiError, VeniceClient, VeniceImageResult
 from app.venice.validation import (
@@ -23,7 +26,7 @@ from app.venice.validation import (
 
 
 EDIT_MODEL = "qwen-image-2-1-pro-edit"
-DEFAULT_VISION_MODEL = "qwen3-vl-235b-a22b"
+DEFAULT_VISION_MODEL = "deepseek-v4-1-flash-uncensored"
 SUPPORTED_SOURCE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 _MIME_BY_SUFFIX = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
@@ -170,6 +173,7 @@ def run_batch(
         output_path: Path | None = None
         try:
             result = client.multi_edit(payload)
+            _validate_result_image(result)
             output_path = _output_path(run_dir, index, source, result)
             _atomic_write_bytes(output_path, result.content)
         except Exception as exc:
@@ -264,6 +268,21 @@ def _output_path(run_dir: Path, index: int, source: Path, result: VeniceImageRes
         raise ValueError("Venice returned an unsupported image content type.")
     stem = re.sub(r"[^A-Za-z0-9_-]+", "_", source.stem).strip("._-")[:80] or "photo"
     return run_dir / f"{index:04d}_{stem}{suffix}"
+
+
+def _validate_result_image(result: VeniceImageResult) -> None:
+    expected = {
+        "image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP",
+    }.get(result.content_type)
+    if expected is None or not result.content:
+        raise ValueError("Venice returned an invalid image.")
+    try:
+        with Image.open(BytesIO(result.content)) as image:
+            if image.format != expected:
+                raise ValueError("Venice image format does not match its content type.")
+            image.load()
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise ValueError("Venice returned an invalid image.") from exc
 
 
 def _set_item(item: dict[str, object], *, stage: str, status: str, error: str | None) -> None:

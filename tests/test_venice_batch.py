@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from dataclasses import replace
 import json
+from io import BytesIO
 from pathlib import Path
 import threading
 
@@ -12,7 +13,7 @@ import pytest
 from PIL import Image
 
 import app.venice.batch as batch_module
-from app.venice.batch import BatchConfig, run_batch
+from app.venice.batch import BatchConfig, DEFAULT_VISION_MODEL, run_batch
 from app.venice.client import VeniceApiError, VeniceImageResult
 from app.venice.validation import ModelProfile
 
@@ -27,12 +28,22 @@ def _image(path: Path, image_format: str) -> Path:
     return path
 
 
+def _generated_jpeg() -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (32, 32), (20, 40, 60)).save(output, "JPEG")
+    return output.getvalue()
+
+
 def _config(tmp_path, source_dir, *, master="master prompt"):
     face = tmp_path / "face.png"
     body = tmp_path / "body.png"
     _image(face, "PNG")
     _image(body, "PNG")
-    return BatchConfig(source_dir, tmp_path / "outputs", master, face, body, "qwen3-vl-235b-a22b")
+    return BatchConfig(source_dir, tmp_path / "outputs", master, face, body)
+
+
+def test_default_prompt_model_is_deepseek_v4_1_flash_uncensored():
+    assert DEFAULT_VISION_MODEL == "deepseek-v4-1-flash-uncensored"
 
 
 class FakeBatchClient:
@@ -54,7 +65,7 @@ class FakeBatchClient:
         self.edit_payloads.append(payload)
         if self.stop_event is not None:
             self.stop_event.set()
-        return VeniceImageResult(b"generated-image", "image/jpeg", "request", {})
+        return VeniceImageResult(_generated_jpeg(), "image/jpeg", "request", {})
 
 
 def test_run_batch_reconstructs_each_photo_with_only_ordered_identity_references(tmp_path):
@@ -66,6 +77,7 @@ def test_run_batch_reconstructs_each_photo_with_only_ordered_identity_references
 
     output_dir = run_batch(client, _profile(), _config(tmp_path, source_dir))
 
+    assert [call[0] for call in client.analyze_calls] == [DEFAULT_VISION_MODEL, DEFAULT_VISION_MODEL]
     assert [call[3] for call in client.analyze_calls] == ["image/jpeg", "image/png"]
     assert len(client.edit_payloads) == 2
     face_bytes = (tmp_path / "face.png").read_bytes()
@@ -224,3 +236,30 @@ def test_run_batch_manifest_excludes_secrets_base64_and_absolute_paths(tmp_path)
     assert "secret-key" not in encoded
     assert "private-base64-token" not in encoded
     assert str(tmp_path) not in encoded
+
+
+def test_run_batch_does_not_mark_non_image_response_completed(tmp_path):
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    _image(source_dir / "photo.jpg", "JPEG")
+    client = FakeBatchClient()
+    client.multi_edit = lambda payload: VeniceImageResult(b"generated-image", "image/jpeg", "request", {})
+    output_dir = run_batch(client, _profile(), _config(tmp_path, source_dir))
+    item = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))["items"][0]
+    assert item["status"] == "failed"
+    assert item["output_file"] is None
+    assert not list(output_dir.glob("*.jpg"))
+
+
+def test_run_batch_rejects_image_bytes_that_disagree_with_content_type(tmp_path):
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    _image(source_dir / "photo.jpg", "JPEG")
+    png = BytesIO()
+    Image.new("RGB", (32, 32)).save(png, "PNG")
+    client = FakeBatchClient()
+    client.multi_edit = lambda payload: VeniceImageResult(png.getvalue(), "image/jpeg", "request", {})
+    output_dir = run_batch(client, _profile(), _config(tmp_path, source_dir))
+    item = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))["items"][0]
+    assert item["status"] == "failed"
+    assert not list(output_dir.glob("*.jpg"))

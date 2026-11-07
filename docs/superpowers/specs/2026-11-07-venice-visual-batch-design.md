@@ -12,13 +12,13 @@ One **Process folder** action processes the supported photos in filename order. 
 
 ## Provider contract
 
-Stage 1 calls `POST /api/v1/chat/completions` with the master prompt and one local photo as a `data:image/...;base64,...` image block. The vision model defaults to `qwen3-vl-235b-a22b` and can be edited. Reject empty or length-truncated responses and prompts exceeding the selected Qwen edit model's current character limit.
+Stage 1 calls `POST /api/v1/chat/completions` with the master prompt and one local photo as a `data:image/...;base64,...` image block. The prompt model defaults to `deepseek-v4-1-flash-uncensored` and can be edited. The model was present in the user's Venice catalog with `supportsVision: true` on 2026-11-07. Reject empty or length-truncated responses and prompts exceeding the selected Qwen edit model's current character limit.
 
 Stage 2 calls the existing Venice multi-edit client with `modelId=qwen-image-2-1-pro-edit`, `resolution=2K`, `aspect_ratio=auto`, `output_format=jpeg`, `safe_mode=false`, and `images=[face_reference, body_reference]`. The source photo is never sent in stage 2. These are the settings recorded for output `venice_20261102_170606_408e9540.jpg`.
 
 ## Files and failure handling
 
-Create a unique run directory inside the selected output parent. Save a prompt TXT and edited image for each photo using numbered source-based names. Save a manifest with the source filename, stage, status, model IDs, prompt filename, output filename, and sanitized error, updating it after each photo. Do not store API keys, headers, Base64, absolute source paths, or source images in the manifest. Do not overwrite originals or prior runs. Continue after a photo-specific validation or generation error; stop on authentication, payment, or rate-limit errors so the same failing request is not repeated across the folder. Do not automatically retry ambiguous timeouts or paid edit calls.
+Create a unique run directory inside the selected output parent. Save a prompt TXT and edited image for each photo using numbered source-based names. Validate that returned image bytes decode and match their declared format before recording completion. Save a manifest with the source filename, stage, status, model IDs, prompt filename, output filename, and sanitized error, updating it after each photo. Do not store API keys, headers, Base64, absolute source paths, or source images in the manifest. Do not overwrite originals or prior runs. Continue after a photo-specific validation or generation error; stop on authentication, payment, or rate-limit errors so the same failing request is not repeated across the folder. Do not automatically retry ambiguous timeouts or paid edit calls. The UI reports completed, failed, and stopped counts. If the main window is closed during a batch, request Stop and defer closing until the in-flight photo finishes.
 
 ## Boundaries and validation
 
