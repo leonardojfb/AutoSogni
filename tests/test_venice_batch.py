@@ -9,12 +9,13 @@ from io import BytesIO
 from pathlib import Path
 import threading
 
+import httpx
 import pytest
 from PIL import Image
 
 import app.venice.batch as batch_module
 from app.venice.batch import BatchConfig, DEFAULT_VISION_MODEL, run_batch
-from app.venice.client import VeniceApiError, VeniceImageResult
+from app.venice.client import VeniceApiError, VeniceClient, VeniceImageResult
 from app.venice.validation import ModelProfile
 
 
@@ -197,6 +198,26 @@ def test_run_batch_does_not_retry_timeout(tmp_path):
     output_dir = run_batch(client, _profile(), _config(tmp_path, source_dir))
     assert len(client.analyze_calls) == 1
     assert json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))["items"][0]["status"] == "failed"
+
+
+def test_run_batch_stops_after_truncated_vision_response(tmp_path):
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    _image(source_dir / "first.jpg", "JPEG")
+    _image(source_dir / "second.jpg", "JPEG")
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={
+            "choices": [{"finish_reason": "length", "message": {"content": "partial"}}]
+        })
+
+    client = VeniceClient(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    output_dir = run_batch(client, _profile(), _config(tmp_path, source_dir))
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert len(requests) == 1
+    assert [item["status"] for item in manifest["items"]] == ["failed", "stopped"]
 
 
 def test_run_batch_saves_too_long_prompt_without_edit_call(tmp_path):

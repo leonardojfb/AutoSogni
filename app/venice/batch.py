@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from PIL import Image
 
-from app.venice.client import VeniceApiError, VeniceClient, VeniceImageResult
+from app.venice.client import VeniceApiError, VeniceClient, VeniceImageResult, VenicePromptTruncatedError
 from app.venice.validation import (
     ModelProfile,
     build_multi_edit_payload,
@@ -325,7 +325,9 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
 
 
 def _is_fatal(error: BaseException) -> bool:
-    return isinstance(error, VeniceApiError) and error.status_code in {401, 402, 429}
+    return isinstance(error, VenicePromptTruncatedError) or (
+        isinstance(error, VeniceApiError) and error.status_code in {401, 402, 429}
+    )
 
 
 def _sanitize_error(error: BaseException, client: object, master_prompt: str, known_paths: tuple[Path, ...]) -> str:

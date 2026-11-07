@@ -25,6 +25,10 @@ class VeniceApiError(RuntimeError):
         super().__init__(message)
 
 
+class VenicePromptTruncatedError(VeniceApiError):
+    """The vision model exhausted its completion budget before finishing."""
+
+
 class VeniceClient:
     BASE_URL = "https://api.venice.ai"
     IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
@@ -113,7 +117,7 @@ class VeniceClient:
         if normalized_mime not in self.IMAGE_TYPES:
             raise VeniceApiError("Vision source image type is unsupported.")
         encoded = base64.b64encode(image_bytes).decode("ascii")
-        response = self._request("POST", "/api/v1/chat/completions", payload={
+        payload = {
             "model": model,
             "max_completion_tokens": 4096,
             "messages": [{
@@ -125,7 +129,10 @@ class VeniceClient:
                     }},
                 ],
             }],
-        })
+        }
+        if model == "deepseek-v4-1-flash-uncensored":
+            payload["reasoning_effort"] = "none"
+        response = self._request("POST", "/api/v1/chat/completions", payload=payload)
         try:
             data = response.json()
             choices = data["choices"]
@@ -133,7 +140,7 @@ class VeniceClient:
             if not isinstance(choice, dict):
                 raise ValueError("Vision response choice was malformed.")
             if choice.get("finish_reason") == "length":
-                raise ValueError("Vision response was truncated.")
+                raise VenicePromptTruncatedError("Vision response was truncated.", response.status_code)
             content = choice["message"]["content"]
             if not isinstance(content, str) or not content.strip():
                 raise ValueError("Vision response was empty.")

@@ -106,8 +106,9 @@ def test_analyze_photo_sends_exact_master_and_one_source_image():
         assert str(request.url) == "https://api.venice.ai/api/v1/chat/completions"
         assert request.headers["Authorization"] == "Bearer secret"
         payload = json.loads(request.content)
-        assert payload["model"] == "qwen3-vl-235b-a22b"
+        assert payload["model"] == "deepseek-v4-1-flash-uncensored"
         assert payload["max_completion_tokens"] == 4096
+        assert payload["reasoning_effort"] == "none"
         content = payload["messages"][0]["content"]
         assert content[0] == {"type": "text", "text": master}
         image_blocks = [block for block in content if block["type"] == "image_url"]
@@ -121,7 +122,7 @@ def test_analyze_photo_sends_exact_master_and_one_source_image():
 
     client = VeniceClient("secret", client=httpx.Client(transport=httpx.MockTransport(handler)))
     assert client.analyze_photo(
-        model="qwen3-vl-235b-a22b", master_prompt=master,
+        model="deepseek-v4-1-flash-uncensored", master_prompt=master,
         image_bytes=source, mime_type="image/jpeg",
     ) == "final prompt"
     assert len(seen) == 1
