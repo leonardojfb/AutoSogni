@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QLineEdit
 
 from app.sogni.auth import ApiKeyStore
 from app.ui import venice as venice_ui
+from app.ui import venice_batch as venice_batch_ui
 from app.ui.venice import VeniceEditWidget
 from app.venice.client import VeniceApiError, VeniceImageResult
 from app.venice.history import VeniceHistoryStore
@@ -119,7 +120,7 @@ def test_venice_slots_preserve_visible_order_after_reorder(tmp_path):
     widget.move_reference(2, -1)
     widget.prompt_edit.setPlainText("  literal prompt\n")
     assert widget._ordered_reference_paths() == [scene, body, face]
-    assert [widget.layout().itemAt(i).layout().itemAt(1).widget().text() for i in (5, 6, 7)] == [
+    assert [widget.single_page.layout().itemAt(i).layout().itemAt(1).widget().text() for i in (4, 5, 6)] == [
         "scene.png", "body.png", "face.png"]
     snapshot = widget._build_request_snapshot()
     payload = widget._build_payload_from_snapshot(snapshot)
@@ -366,4 +367,158 @@ def test_provider_error_preserves_controls_and_shows_sanitized_message(tmp_path)
     assert widget.prompt_edit.toPlainText() == "keep this prompt"
     assert widget._ordered_reference_paths() == [scene]
     assert widget.status_label.text() == "Venice API returned HTTP 429."
+    widget.close()
+
+
+def test_venice_has_editable_batch_page_and_one_click_snapshot(tmp_path, monkeypatch):
+    client = FakeVeniceClient()
+    widget = _widget(tmp_path, client)
+    batch = widget.batch_tab
+    assert [widget.pages.tabText(i) for i in range(widget.pages.count())] == ["Single image", "Batch"]
+    assert batch.master_prompt_edit.isReadOnly() is False
+
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    output_parent = tmp_path / "outputs"
+    face = _image(tmp_path / "face.png")
+    body = _image(tmp_path / "body.png")
+    source = _image(source_dir / "photo.jpg")
+    batch.source_dir_edit.setText(str(source_dir))
+    batch.output_parent_edit.setText(str(output_parent))
+    batch.face_path_edit.setText(str(face))
+    batch.body_path_edit.setText(str(body))
+    batch.master_prompt_edit.setPlainText("snapshot master")
+    captured = []
+
+    def fake_run(client_arg, profile, config, progress=None, stop_event=None):
+        captured.append(config)
+        return output_parent / "run"
+
+    monkeypatch.setattr(venice_batch_ui, "run_batch", fake_run)
+    batch.process_button.click()
+    _wait_until(lambda: bool(captured))
+    batch.source_dir_edit.setText(str(tmp_path / "changed-source"))
+    batch.master_prompt_edit.setPlainText("changed master")
+    assert captured[0].input_dir == source_dir
+    assert captured[0].master_prompt == "snapshot master"
+    assert captured[0].face_path == face
+    assert captured[0].body_path == body
+    assert captured[0].input_dir != Path(batch.source_dir_edit.text())
+    assert source.exists()
+    widget.close()
+
+
+def test_batch_missing_master_or_references_fails_before_worker(tmp_path, monkeypatch):
+    client = FakeVeniceClient()
+    widget = _widget(tmp_path, client)
+    batch = widget.batch_tab
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    batch.source_dir_edit.setText(str(source_dir))
+    batch.output_parent_edit.setText(str(tmp_path / "outputs"))
+    batch.master_prompt_edit.clear()
+    started = []
+    monkeypatch.setattr(venice_batch_ui, "run_batch", lambda *args, **kwargs: started.append(True))
+    batch.process_button.click()
+    assert started == []
+    assert "master" in batch.status_label.text().lower()
+    widget.close()
+
+
+def test_batch_status_event_exposes_saved_prompt_for_optional_review(tmp_path):
+    client = FakeVeniceClient()
+    widget = _widget(tmp_path, client)
+    batch = widget.batch_tab
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("saved prompt", encoding="utf-8")
+    batch._on_progress(venice_batch_ui.BatchEvent(
+        index=1, filename="photo.jpg", stage="prompt", status="saved",
+        prompt_path=prompt_path,
+    ))
+    batch.progress_table.selectRow(0)
+    _app().processEvents()
+    assert batch.prompt_preview.toPlainText() == "saved prompt"
+    widget.close()
+
+
+def test_batch_close_requests_stop_for_active_worker(tmp_path, monkeypatch):
+    client = FakeVeniceClient()
+    widget = _widget(tmp_path, client)
+    batch = widget.batch_tab
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    batch.source_dir_edit.setText(str(source_dir))
+    batch.output_parent_edit.setText(str(tmp_path / "outputs"))
+    batch.face_path_edit.setText(str(_image(tmp_path / "face.png")))
+    batch.body_path_edit.setText(str(_image(tmp_path / "body.png")))
+    batch.master_prompt_edit.setPlainText("master")
+    started = threading.Event()
+    release = threading.Event()
+    observed = []
+
+    def fake_run(client_arg, profile, config, progress=None, stop_event=None):
+        observed.append(stop_event)
+        started.set()
+        release.wait(3)
+        return tmp_path / "run"
+
+    monkeypatch.setattr(venice_batch_ui, "run_batch", fake_run)
+    batch.process_button.click()
+    _wait_until(started.is_set)
+    batch.close()
+    assert observed[0].is_set()
+    assert batch._closed
+    release.set()
+    _wait_until(lambda: not batch._active)
+    widget.close()
+
+
+def test_batch_disables_venice_key_changes_while_active(tmp_path, monkeypatch):
+    client = FakeVeniceClient()
+    widget = _widget(tmp_path, client)
+    batch = widget.batch_tab
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    batch.source_dir_edit.setText(str(source_dir))
+    batch.output_parent_edit.setText(str(tmp_path / "outputs"))
+    batch.face_path_edit.setText(str(_image(tmp_path / "face.png")))
+    batch.body_path_edit.setText(str(_image(tmp_path / "body.png")))
+    batch.master_prompt_edit.setPlainText("master")
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_run(client_arg, profile, config, progress=None, stop_event=None):
+        started.set()
+        release.wait(3)
+        return tmp_path / "run"
+
+    monkeypatch.setattr(venice_batch_ui, "run_batch", fake_run)
+    batch.process_button.click()
+    _wait_until(started.is_set)
+    assert widget.key_edit.isReadOnly()
+    assert not widget.save_key_button.isEnabled()
+    release.set()
+    _wait_until(lambda: not batch._active)
+    assert not widget.key_edit.isReadOnly()
+    widget.close()
+
+
+def test_batch_preflight_error_does_not_expose_reference_path(tmp_path):
+    client = FakeVeniceClient()
+    widget = _widget(tmp_path, client)
+    batch = widget.batch_tab
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    _image(source_dir / "photo.jpg")
+    bad_face = tmp_path / "private-face.png"
+    bad_face.write_text("not an image", encoding="utf-8")
+    batch.source_dir_edit.setText(str(source_dir))
+    batch.output_parent_edit.setText(str(tmp_path / "outputs"))
+    batch.face_path_edit.setText(str(bad_face))
+    batch.body_path_edit.setText(str(_image(tmp_path / "body.png")))
+    batch.master_prompt_edit.setPlainText("master")
+    batch.process_button.click()
+    _wait_until(lambda: not batch._active)
+    assert str(tmp_path) not in batch.status_label.text()
+    assert "image" in batch.status_label.text().lower()
     widget.close()

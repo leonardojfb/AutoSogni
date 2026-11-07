@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 
 import httpx
@@ -97,6 +98,50 @@ class VeniceClient:
         except (ValueError, UnicodeError) as exc:
             raise VeniceApiError("Venice model catalog returned invalid JSON.", response.status_code) from exc
         return parse_model_catalog(data)
+
+    def analyze_photo(
+        self, *, model: str, master_prompt: str, image_bytes: bytes, mime_type: str,
+    ) -> str:
+        """Turn one local photo into the complete prompt for the edit model."""
+        if not str(model).strip():
+            raise VeniceApiError("Venice vision model is required.")
+        if not str(master_prompt).strip():
+            raise VeniceApiError("Vision master prompt is required.")
+        if not image_bytes:
+            raise VeniceApiError("Vision source image is empty.")
+        normalized_mime = str(mime_type).strip().lower()
+        if normalized_mime not in self.IMAGE_TYPES:
+            raise VeniceApiError("Vision source image type is unsupported.")
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        response = self._request("POST", "/api/v1/chat/completions", payload={
+            "model": model,
+            "max_completion_tokens": 4096,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": master_prompt},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:{normalized_mime};base64,{encoded}"
+                    }},
+                ],
+            }],
+        })
+        try:
+            data = response.json()
+            choices = data["choices"]
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                raise ValueError("Vision response choice was malformed.")
+            if choice.get("finish_reason") == "length":
+                raise ValueError("Vision response was truncated.")
+            content = choice["message"]["content"]
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("Vision response was empty.")
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError, UnicodeError) as exc:
+            if isinstance(exc, VeniceApiError):
+                raise
+            raise VeniceApiError(str(exc), response.status_code) from None
+        return content.strip()
 
     def multi_edit(self, payload: dict[str, object]) -> VeniceImageResult:
         response = self._request("POST", "/api/v1/image/multi-edit", payload=payload)

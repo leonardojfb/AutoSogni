@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 import traceback
@@ -93,6 +94,52 @@ def test_multi_edit_returns_binary_result_without_rewriting_payload():
     assert result.request_id == "req-1"
     assert result.headers["x-request-id"] == "req-1"
     assert "secret" not in repr(result)
+
+
+def test_analyze_photo_sends_exact_master_and_one_source_image():
+    seen = []
+    source = b"source-photo-bytes"
+    master = "Return one complete prompt."
+
+    def handler(request):
+        seen.append(request)
+        assert str(request.url) == "https://api.venice.ai/api/v1/chat/completions"
+        assert request.headers["Authorization"] == "Bearer secret"
+        payload = json.loads(request.content)
+        assert payload["model"] == "qwen3-vl-235b-a22b"
+        assert payload["max_completion_tokens"] == 4096
+        content = payload["messages"][0]["content"]
+        assert content[0] == {"type": "text", "text": master}
+        image_blocks = [block for block in content if block["type"] == "image_url"]
+        assert len(image_blocks) == 1
+        data_url = image_blocks[0]["image_url"]["url"]
+        assert data_url.startswith("data:image/jpeg;base64,")
+        assert base64.b64decode(data_url.split(",", 1)[1]) == source
+        return httpx.Response(200, json={
+            "choices": [{"finish_reason": "stop", "message": {"content": " final prompt "}}]
+        })
+
+    client = VeniceClient("secret", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert client.analyze_photo(
+        model="qwen3-vl-235b-a22b", master_prompt=master,
+        image_bytes=source, mime_type="image/jpeg",
+    ) == "final prompt"
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("response", [
+    {"choices": [{"finish_reason": "stop", "message": {"content": "  "}}]},
+    {"choices": [{"finish_reason": "length", "message": {"content": "partial"}}]},
+    {"choices": [None]},
+])
+def test_analyze_photo_rejects_empty_or_truncated_content(response):
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=response))
+    client = VeniceClient(client=httpx.Client(transport=transport))
+    with pytest.raises(VeniceApiError):
+        client.analyze_photo(
+            model="qwen3-vl-235b-a22b", master_prompt="master",
+            image_bytes=b"photo", mime_type="image/png",
+        )
 
 
 def test_multi_edit_redacts_key_if_provider_echoes_it_in_response_header():

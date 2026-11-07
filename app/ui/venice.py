@@ -13,7 +13,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QPushButton, QTableWidget, QTableWidgetItem, QTextEdit, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from app.sogni.auth import ApiKeyStore
@@ -24,6 +24,7 @@ from app.venice.validation import (
     ModelProfile, REQUESTED_MODEL_IDS, build_multi_edit_payload,
     validate_prompt_and_images,
 )
+from app.ui.venice_batch import VeniceBatchWidget
 
 
 _MODEL_NAMES = {
@@ -99,6 +100,10 @@ class VeniceEditWidget(QWidget):
         root.addLayout(key_row)
         self._refresh_key_source()
 
+        self.pages = QTabWidget()
+        self.single_page = QWidget()
+        self._single_layout = QVBoxLayout(self.single_page)
+
         model_row = QHBoxLayout()
         model_row.addWidget(QLabel("Model"))
         self.model_combo = QComboBox()
@@ -107,15 +112,15 @@ class VeniceEditWidget(QWidget):
         self.refresh_button = QPushButton("Refresh models")
         self.refresh_button.clicked.connect(self.refresh_catalog)
         model_row.addWidget(self.refresh_button)
-        root.addLayout(model_row)
+        self._single_layout.addLayout(model_row)
 
-        root.addWidget(QLabel("Prompt"))
+        self._single_layout.addWidget(QLabel("Prompt"))
         self.prompt_edit = QTextEdit()
-        root.addWidget(self.prompt_edit)
-        root.addWidget(QLabel("References (top to bottom = request order)"))
+        self._single_layout.addWidget(self.prompt_edit)
+        self._single_layout.addWidget(QLabel("References (top to bottom = request order)"))
         self._reference_rows = [_ReferenceRow(self) for _ in range(3)]
         for row in self._reference_rows:
-            root.addLayout(row.layout)
+            self._single_layout.addLayout(row.layout)
         self._update_reference_rows()
 
         options = QHBoxLayout()
@@ -132,7 +137,7 @@ class VeniceEditWidget(QWidget):
         self.safe_mode_check = QCheckBox("Safe mode")
         self.safe_mode_check.setChecked(True)
         options.addWidget(self.safe_mode_check)
-        root.addLayout(options)
+        self._single_layout.addLayout(options)
 
         output_row = QHBoxLayout()
         self.output_dir_label = QLabel(str(self.output_dir))
@@ -140,23 +145,31 @@ class VeniceEditWidget(QWidget):
         self.output_dir_button = QPushButton("Choose output folder")
         self.output_dir_button.clicked.connect(self._choose_output_dir)
         output_row.addWidget(self.output_dir_button)
-        root.addLayout(output_row)
+        self._single_layout.addLayout(output_row)
         self.generate_button = QPushButton("Generate")
         self.generate_button.setEnabled(False)
         self.generate_button.clicked.connect(self.generate)
-        root.addWidget(self.generate_button)
+        self._single_layout.addWidget(self.generate_button)
         self.status_label = QLabel("Loading Venice model catalog…")
-        root.addWidget(self.status_label)
+        self._single_layout.addWidget(self.status_label)
         self.preview_label = QLabel("Output preview")
-        root.addWidget(self.preview_label)
+        self._single_layout.addWidget(self.preview_label)
         self.history_table = QTableWidget(0, 5)
         self.history_table.setHorizontalHeaderLabels(["Time", "Model", "Prompt", "References", "Output"])
-        root.addWidget(self.history_table)
+        self._single_layout.addWidget(self.history_table)
         self._load_history()
+        self.batch_tab = VeniceBatchWidget(self.client, self.key_store, self)
+        self.batch_tab.active_changed.connect(self._on_batch_active_changed)
+        self.pages.addTab(self.single_page, "Single image")
+        self.pages.addTab(self.batch_tab, "Batch")
+        root.addWidget(self.pages)
         self.refresh_catalog()
 
     def _save_key(self) -> None:
         self._refresh_key_source()
+        if getattr(self.batch_tab, "_active", False):
+            self.status_label.setText("Venice API key is locked while the batch is running.")
+            return
         if os.environ.get("VENICE_API_KEY", "").strip():
             self.status_label.setText("VENICE_API_KEY is active; file key was not saved.")
             return
@@ -170,10 +183,17 @@ class VeniceEditWidget(QWidget):
 
     def _refresh_key_source(self) -> None:
         environment_active = bool(os.environ.get("VENICE_API_KEY", "").strip())
-        self.key_edit.setReadOnly(environment_active)
-        self.save_key_button.setEnabled(not environment_active)
+        batch_active = getattr(getattr(self, "batch_tab", None), "_active", False)
+        self.key_edit.setReadOnly(environment_active or batch_active)
+        self.save_key_button.setEnabled(not environment_active and not batch_active)
         self.key_source_label.setText("VENICE_API_KEY is active; file key disabled."
-                                      if environment_active else "Local Venice key")
+                                      if environment_active else (
+                                          "Venice key locked while batch runs." if batch_active else "Local Venice key"))
+
+    def _on_batch_active_changed(self, active: bool) -> None:
+        self._refresh_key_source()
+        if active:
+            self.key_source_label.setText("Venice key locked while batch runs.")
 
     def refresh_catalog(self) -> None:
         self._refresh_key_source()
@@ -191,6 +211,11 @@ class VeniceEditWidget(QWidget):
                 self._catalog_events.completed.emit(None, exc)
 
         threading.Thread(target=work, name="Venice catalog", daemon=True).start()
+
+    def closeEvent(self, event) -> None:
+        if hasattr(self, "batch_tab"):
+            self.batch_tab.shutdown()
+        super().closeEvent(event)
 
     def _on_catalog_complete(self, profiles: object, error: object) -> None:
         self._catalog_active = False
@@ -249,11 +274,11 @@ class VeniceEditWidget(QWidget):
         if not 0 <= new < len(self._reference_rows):
             return
         self._reference_rows[old], self._reference_rows[new] = self._reference_rows[new], self._reference_rows[old]
-        layout = self.layout()
+        layout = self._single_layout
         for reference in self._reference_rows:
             layout.removeItem(reference.layout)
         for index, reference in enumerate(self._reference_rows):
-            layout.insertLayout(5 + index, reference.layout)
+            layout.insertLayout(4 + index, reference.layout)
         self._update_reference_rows()
 
     def _update_reference_rows(self) -> None:

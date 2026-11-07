@@ -91,6 +91,14 @@ Saved images go to the selected output folder (by default,
 `data/venice_history.json`. The key saved from this tab is stored separately in
 `data/venice_api_key.txt`. Tests do not perform paid image generation.
 
+The `Batch` page processes a folder with one `Process folder` action. Choose the
+source folder, the face/hair reference first and body reference second, an
+output parent, and edit the master prompt (or load it from a TXT file). Each
+photo is sent to Venice Vision for an individual prompt, then to Qwen Image
+2.1 Pro Edit with those two identity references; the generated image and its
+`.prompt.txt` are saved together in a unique run folder. A batch makes two
+Venice calls per photo and does not pause for prompt review.
+
 ## Sogni API Notes
 
 The integration uses the current Sogni docs as of 2026-09-14:
