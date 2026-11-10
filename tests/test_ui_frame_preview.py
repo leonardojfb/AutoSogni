@@ -3,7 +3,9 @@ import json
 import time
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QMessageBox, QAbstractItemView
+from PySide6.QtWidgets import (
+    QApplication, QAbstractItemView, QLabel, QListWidgetItem, QMessageBox, QScrollArea,
+)
 
 from app.core.campaign_manager import CampaignManager
 from app.database.db import Database
@@ -499,6 +501,10 @@ def test_image_edit_tabs_upload_model_specific_payloads(tmp_path: Path):
         "Face Swap", "Flux Edit", "Nano Banana Pro", "Qwen Image 3.0 Edit",
         "FLUX 3 Klein Base Edit", "Qwen Image Edit 2511",
     }
+    assert all(isinstance(window.image_tabs.widget(index), QScrollArea)
+               for index in range(window.image_tabs.count()))
+    assert all(window.image_tabs.widget(index).widgetResizable()
+               for index in range(window.image_tabs.count()))
 
     for key, prompt in (("flux3", "Make it blue"), ("qwen2511", "Make it red")):
         controls = window._image_edit_controls[key]
@@ -834,10 +840,11 @@ def test_running_wavespeed_queue_uses_frozen_jobs_and_disables_edits(tmp_path: P
         window.wavespeed_reference_lists[kind].addItem(reference)
     window.wavespeed_prompt_edit.setPlainText("Next scene")
     window._wavespeed_add_current_to_queue()
-    assert len(window._wavespeed_queue_active.items) == 2
-    assert window._wavespeed_queue_active.items[1].reference_images == [str(next_frame)]
-    assert window._wavespeed_queue_active.items[1].reference_videos == [str(next_video)]
-    assert window._wavespeed_queue_active.items[1].prompt == "Next scene"
+    assert len(window._wavespeed_queue_active.items) == 1
+    assert len(widget.queue().items) == 2
+    assert widget.queue().items[1].reference_images == [str(next_frame)]
+    assert widget.queue().items[1].reference_videos == [str(next_video)]
+    assert widget.queue().items[1].prompt == "Next scene"
     widget.queue().items[0].status = QueueStatus.FAILED
     widget.set_item_update(widget.queue().items[0])
     assert not widget.table.cellWidget(0, 14).isEnabled()
@@ -845,8 +852,11 @@ def test_running_wavespeed_queue_uses_frozen_jobs_and_disables_edits(tmp_path: P
     started = []
     monkeypatch.setattr(window, "_start_wavespeed_queue", lambda: started.append(True))
     window._handle_wavespeed_event("queue_finished", None)
-    assert started == [True]
+    assert started == []
     assert widget.queue().items[0].status == QueueStatus.COMPLETED
+    campaigns, _active_id = window.wavespeed_campaign_store.load()
+    assert campaigns[0].queue.items[0].status == QueueStatus.COMPLETED
+    assert campaigns[0].queue.items[1].prompt == "Next scene"
 
 
 def test_wavespeed_price_does_not_show_a_previous_references_estimate(tmp_path: Path):

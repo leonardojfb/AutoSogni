@@ -819,14 +819,21 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         self.image_tabs = QTabWidget()
         self._image_edit_controls = {}
-        self.image_tabs.addTab(self._face_swap_tab(), "Face Swap")
-        self.image_tabs.addTab(self._flux_tab(), "Flux Edit")
-        self.image_tabs.addTab(self._image_edit_tab("nano_banana"), "Nano Banana Pro")
-        self.image_tabs.addTab(self._image_edit_tab("qwen_image"), "Qwen Image 3.0 Edit")
-        self.image_tabs.addTab(self._image_edit_tab("flux3"), "FLUX 3 Klein Base Edit")
-        self.image_tabs.addTab(self._image_edit_tab("qwen2511"), "Qwen Image Edit 2511")
+        self.image_tabs.addTab(self._scrollable_image_page(self._face_swap_tab()), "Face Swap")
+        self.image_tabs.addTab(self._scrollable_image_page(self._flux_tab()), "Flux Edit")
+        self.image_tabs.addTab(self._scrollable_image_page(self._image_edit_tab("nano_banana")), "Nano Banana Pro")
+        self.image_tabs.addTab(self._scrollable_image_page(self._image_edit_tab("qwen_image")), "Qwen Image 3.0 Edit")
+        self.image_tabs.addTab(self._scrollable_image_page(self._image_edit_tab("flux3")), "FLUX 3 Klein Base Edit")
+        self.image_tabs.addTab(self._scrollable_image_page(self._image_edit_tab("qwen2511")), "Qwen Image Edit 2511")
         layout.addWidget(self.image_tabs)
         return page
+
+    @staticmethod
+    def _scrollable_image_page(page: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(page)
+        return scroll
 
     def _image_edit_tab(self, key: str) -> QWidget:
         nano_banana = key == "nano_banana"
@@ -1864,9 +1871,8 @@ class MainWindow(QMainWindow):
         queue = self.wavespeed_queue_widget.queue()
         queue.output_dir = snapshot["output_dir"]
         self.wavespeed_queue_widget.append_item(item)
-        if self._wavespeed_queue_running and self._wavespeed_queue_active is not None:
-            self._wavespeed_queue_active.items.append(WaveSpeedQueueItem.from_dict(item.to_dict()))
-            self._persist_wavespeed_campaign_queue(self._wavespeed_queue_active)
+        if self._wavespeed_queue_running:
+            self._persist_wavespeed_campaign_queue(queue)
         else:
             self._save_wavespeed_queue()
         self.wavespeed_status_label.setText("Job agregado a la cola con sus referencias y prompt.")
@@ -2194,7 +2200,7 @@ class MainWindow(QMainWindow):
         self._wavespeed_queue_cancel_event.clear()
         self._wavespeed_queue_running = True
         self.wavespeed_queue_widget.set_running(True)
-        self._persist_wavespeed_campaign_queue(queue)
+        self._persist_wavespeed_campaign_queue(self.wavespeed_queue_widget.queue())
         self.wavespeed_queue_widget.set_error("Cola iniciada.")
         thread = threading.Thread(target=self._run_wavespeed_queue, args=(queue,), daemon=True)
         thread.start()
@@ -2249,11 +2255,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             error = exc
         finally:
-            self._persist_wavespeed_campaign_queue(queue)
             self._post_wavespeed_event("queue_finished", error)
 
     def _wavespeed_queue_item_update(self, queue, item: WaveSpeedQueueItem) -> None:
-        self._persist_wavespeed_campaign_queue(queue)
         self._post_wavespeed_event("queue_item", item)
 
     def _wavespeed_upload_cached(self, path: Path) -> dict:
@@ -3008,6 +3012,7 @@ class MainWindow(QMainWindow):
                 self.wavespeed_status_label.setText(f"Tareas eliminadas: {payload}")
         elif kind == "queue_item":
             self.wavespeed_queue_widget.set_item_update(payload)
+            self._persist_wavespeed_campaign_queue(self.wavespeed_queue_widget.queue())
         elif kind == "queue_prices":
             self.wavespeed_queue_estimate_button.setEnabled(True)
             self.wavespeed_queue_widget.set_estimating(False)
@@ -3024,6 +3029,7 @@ class MainWindow(QMainWindow):
             if finished_queue is not None:
                 for item in finished_queue.items:
                     self.wavespeed_queue_widget.set_item_update(item)
+            self._persist_wavespeed_campaign_queue(self.wavespeed_queue_widget.queue())
             self._wavespeed_queue_running = False
             self._wavespeed_queue_active = None
             self.wavespeed_queue_widget.set_running(False)
