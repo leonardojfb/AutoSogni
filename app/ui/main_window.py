@@ -15,7 +15,7 @@ from app.sogni.schemas import ModelDescriptor
 from app.sogni.auth import ApiKeyStore
 from app.sogni.loras import validate_lora_selection
 from app.ui.sogni_loras import SogniLoraDialog
-from app.ui.numeric_inputs import WheelSafeSpinBox
+from app.ui.numeric_inputs import WheelSafeComboBox, WheelSafeSpinBox
 from app.utils.paths import data_dir
 from app.wavespeed.client import WaveSpeedClient
 from app.byteplus.client import BytePlusClient
@@ -78,7 +78,6 @@ try:
     from PySide6.QtWidgets import (
         QAbstractItemView,
         QApplication,
-        QComboBox,
         QCheckBox,
         QFileDialog,
         QFormLayout,
@@ -177,7 +176,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(root)
 
         top = QHBoxLayout()
-        self.campaign_combo = QComboBox()
+        self.campaign_combo = WheelSafeComboBox()
         self.campaign_combo.currentIndexChanged.connect(self._select_campaign_from_combo)
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self._load_campaigns)
@@ -209,9 +208,9 @@ class MainWindow(QMainWindow):
         self.prompts_edit = QLineEdit()
         self.output_edit = QLineEdit()
         self.template_edit = QLineEdit("{outfit}__{prompt_id}_{prompt_name}.mp4")
-        self.org_combo = QComboBox()
+        self.org_combo = WheelSafeComboBox()
         self.org_combo.addItems(["by_outfit", "flat"])
-        self.model_combo = QComboBox()
+        self.model_combo = WheelSafeComboBox()
         self.model_combo.currentIndexChanged.connect(self._sogni_model_changed)
         self.sogni_lora_button = QPushButton("Browse LoRAs")
         self.sogni_lora_button.setToolTip("Elegí un modelo MiniMax H3 de imagen a video para ver sus LoRAs comunitarias.")
@@ -219,11 +218,11 @@ class MainWindow(QMainWindow):
         self.sogni_lora_label = QLabel("Elegí un modelo MiniMax H3 I2V")
         self.sogni_sensitive_filter_check = QCheckBox("Filtro de contenido sensible activo")
         self.sogni_sensitive_filter_check.setChecked(True)
-        self.duration_mode_combo = QComboBox()
+        self.duration_mode_combo = WheelSafeComboBox()
         self.duration_mode_combo.addItem("Detectar automaticamente", "auto")
         self.duration_mode_combo.addItem("Manual", "manual")
         self.duration_seconds_edit = QLineEdit("8")
-        self.aspect_ratio_combo = QComboBox()
+        self.aspect_ratio_combo = WheelSafeComboBox()
         self.aspect_ratio_combo.addItems(ASPECT_RATIOS)
         self.concurrency_spin = WheelSafeSpinBox()
         self.concurrency_spin.setRange(1, 3)
@@ -382,7 +381,7 @@ class MainWindow(QMainWindow):
         connection_form.addWidget(test_key, 1, 0)
         connection_form.addWidget(self.wavespeed_connection_label, 1, 1)
         connection_form.addWidget(self.wavespeed_balance_label, 1, 2)
-        self.wavespeed_model_combo = QComboBox()
+        self.wavespeed_model_combo = WheelSafeComboBox()
         self.wavespeed_model_combo.addItem("WAN 3.0 Reference-to-Video", WAN_MODEL_ID)
         self.wavespeed_model_combo.addItem("Seedance 2.0 Text-to-Video", SEEDANCE_MODEL_ID)
         self.wavespeed_model_combo.addItem("Seedance 2.0 Image-to-Video Spicy", SEEDANCE_I2V_SPICY_MODEL_ID)
@@ -440,10 +439,10 @@ class MainWindow(QMainWindow):
 
         parameters = QGroupBox("Parámetros del modelo")
         parameters_form = QGridLayout(parameters)
-        self.wavespeed_resolution_combo = QComboBox()
+        self.wavespeed_resolution_combo = WheelSafeComboBox()
         self.wavespeed_resolution_combo.addItems([*WAVESPEED_RESOLUTIONS, "4k"])
         self.wavespeed_resolution_combo.setCurrentText("720p")
-        self.wavespeed_aspect_combo = QComboBox()
+        self.wavespeed_aspect_combo = WheelSafeComboBox()
         self.wavespeed_aspect_combo.addItems([*WAVESPEED_ASPECT_RATIOS, "21:9"])
         self.wavespeed_aspect_combo.setCurrentText("16:9")
         self.wavespeed_duration_spin = WheelSafeSpinBox()
@@ -650,12 +649,12 @@ class MainWindow(QMainWindow):
         save = QPushButton("Guardar clave BytePlus"); save.clicked.connect(self._byteplus_save_key)
         test = QPushButton("Probar API"); test.clicked.connect(self._byteplus_test_connection)
         layout.addWidget(QLabel("BytePlus ModelArk · dreamina-seedance-2-0-260128")); layout.addWidget(self.byteplus_api_key_edit); layout.addWidget(save); layout.addWidget(test)
-        self.byteplus_mode_combo = QComboBox(); self.byteplus_mode_combo.addItems(["Texto a video", "Imagen primer frame", "Imagen primer y último frame", "Referencias omni", "Editar video", "Extender video"])
+        self.byteplus_mode_combo = WheelSafeComboBox(); self.byteplus_mode_combo.addItems(["Texto a video", "Imagen primer frame", "Imagen primer y último frame", "Referencias omni", "Editar video", "Extender video"])
         self.byteplus_prompt_edit = QTextEdit(); self.byteplus_prompt_edit.setPlaceholderText("Prompt Seedance 2.0")
         self.byteplus_references = BytePlusReferences()
         self.byteplus_mode_combo.currentIndexChanged.connect(self.byteplus_references.set_mode)
-        self.byteplus_resolution_combo = QComboBox(); self.byteplus_resolution_combo.addItems(["480p", "720p", "1080p", "4k"])
-        self.byteplus_ratio_combo = QComboBox(); self.byteplus_ratio_combo.addItems(["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]); self.byteplus_ratio_combo.setCurrentText("16:9")
+        self.byteplus_resolution_combo = WheelSafeComboBox(); self.byteplus_resolution_combo.addItems(["480p", "720p", "1080p", "4k"])
+        self.byteplus_ratio_combo = WheelSafeComboBox(); self.byteplus_ratio_combo.addItems(["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]); self.byteplus_ratio_combo.setCurrentText("16:9")
         self.byteplus_duration_spin = WheelSafeSpinBox(); self.byteplus_duration_spin.setRange(4, 15); self.byteplus_duration_spin.setValue(5)
         self.byteplus_input_duration_spin = WheelSafeSpinBox(); self.byteplus_input_duration_spin.setRange(0, 120); self.byteplus_input_duration_spin.setValue(0)
         self.byteplus_audio_check = QCheckBox("Generar audio"); self.byteplus_audio_check.setChecked(True); self.byteplus_watermark_check = QCheckBox("Watermark"); self.byteplus_last_frame_check = QCheckBox("Devolver último frame")
@@ -682,7 +681,7 @@ class MainWindow(QMainWindow):
                 upload_settings["https_token"] = self._byteplus_upload_token_path.read_text(encoding="utf-8").strip()
             except OSError:
                 upload_settings["https_token"] = ""
-        self.byteplus_upload_provider_combo = QComboBox()
+        self.byteplus_upload_provider_combo = WheelSafeComboBox()
         self.byteplus_upload_provider_combo.addItem("BytePlus TOS", "tos")
         self.byteplus_upload_provider_combo.addItem("Servidor HTTPS", "https")
         provider_index = self.byteplus_upload_provider_combo.findData(upload_settings.get("provider") or "https")
@@ -872,11 +871,11 @@ class MainWindow(QMainWindow):
             layout.addWidget(multi_toggle)
         layout.addWidget(single_inputs)
         options = QGridLayout()
-        aspect = QComboBox()
+        aspect = WheelSafeComboBox()
         aspect.addItem("Usar la relación de la primera imagen", "")
         for ratio in (FLUX_3_ASPECT_RATIOS if key == "flux3" else IMAGE_EDIT_ASPECT_RATIOS):
             aspect.addItem(ratio, ratio)
-        resolution = QComboBox()
+        resolution = WheelSafeComboBox()
         resolution.addItems(["1k", "2k", "4k"] if nano_banana else
                             ["1k", "1.5k", "2k"] if key == "flux3" else ["1k", "2k"])
         if key != "qwen2511":
@@ -887,7 +886,7 @@ class MainWindow(QMainWindow):
         controls = {"prompt": prompt, "images": images, "aspect": aspect, "resolution": resolution,
                     "maximum": maximum, "model_id": model_id}
         if nano_banana:
-            output_format = QComboBox()
+            output_format = WheelSafeComboBox()
             output_format.addItems(["png", "jpeg"])
             sync = QCheckBox("enable_sync_mode")
             base64_output = QCheckBox("enable_base64_output")
@@ -924,7 +923,7 @@ class MainWindow(QMainWindow):
             self.qwen_image_random_seed_check = random_seed
             self.qwen_image_seed_spin = seed
         else:
-            output_format = QComboBox()
+            output_format = WheelSafeComboBox()
             output_format.addItems(["jpeg", "png", "webp"])
             sync = QCheckBox("enable_sync_mode")
             base64_output = QCheckBox("enable_base64_output")
@@ -1257,11 +1256,11 @@ class MainWindow(QMainWindow):
         options = QGridLayout()
         self.face_swap_target_index = WheelSafeSpinBox()
         self.face_swap_target_index.setRange(0, 10)
-        self.face_swap_gender_combo = QComboBox()
+        self.face_swap_gender_combo = WheelSafeComboBox()
         self.face_swap_gender_combo.addItem("Mujer", "female")
         self.face_swap_gender_combo.addItem("Todos", "all")
         self.face_swap_gender_combo.addItem("Hombre", "male")
-        self.face_swap_format_combo = QComboBox()
+        self.face_swap_format_combo = WheelSafeComboBox()
         self.face_swap_format_combo.addItems(["png", "jpeg", "webp"])
         options.addWidget(QLabel("Rostro objetivo (0 = rostro más grande)"), 0, 0)
         options.addWidget(self.face_swap_target_index, 0, 1)

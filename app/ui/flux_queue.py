@@ -4,12 +4,13 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QAbstractItemView, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from app.wavespeed.flux_queue import FluxQueue, FluxQueueItem
 from app.wavespeed.queue import QueueStatus
+from app.ui.numeric_inputs import WheelSafeComboBox
 
 
 class FluxQueueWidget(QWidget):
@@ -36,11 +37,11 @@ class FluxQueueWidget(QWidget):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         campaigns = QHBoxLayout()
-        self.campaign_combo = QComboBox()
+        self.campaign_combo = WheelSafeComboBox()
         self.campaign_combo.currentIndexChanged.connect(
             lambda index: self.campaign_selected.emit(str(self.campaign_combo.itemData(index) or "")) if index >= 0 else None)
         self.campaign_name_edit = QLineEdit("Nueva campaña Flux")
-        self.execution_mode_combo = QComboBox()
+        self.execution_mode_combo = WheelSafeComboBox()
         self.execution_mode_combo.addItem("Secuencial", "sequential")
         self.execution_mode_combo.addItem("Paralelo", "parallel")
         self.execution_mode_combo.currentIndexChanged.connect(lambda _index: self.queue_changed.emit())

@@ -5,7 +5,6 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -18,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.wavespeed.queue import QueueStatus, WaveSpeedQueue, WaveSpeedQueueItem
+from app.ui.numeric_inputs import WheelSafeComboBox
 
 
 class WaveSpeedQueueWidget(QWidget):
@@ -63,7 +63,7 @@ class WaveSpeedQueueWidget(QWidget):
         layout = QVBoxLayout(self)
         campaign_row = QHBoxLayout()
         campaign_row.addWidget(QLabel("Campaña"))
-        self.campaign_combo = QComboBox()
+        self.campaign_combo = WheelSafeComboBox()
         self.campaign_combo.currentIndexChanged.connect(self._campaign_index_changed)
         self.campaign_name_edit = QLineEdit("Nueva campaña")
         self.campaign_name_edit.setPlaceholderText("Nombre de la campaña")
@@ -74,7 +74,7 @@ class WaveSpeedQueueWidget(QWidget):
         self.campaign_delete_button = QPushButton("Eliminar campaña")
         self.campaign_delete_button.clicked.connect(self.delete_campaign_requested.emit)
         campaign_row.addWidget(QLabel("Modo"))
-        self.execution_mode_combo = QComboBox()
+        self.execution_mode_combo = WheelSafeComboBox()
         self.execution_mode_combo.addItem("Secuencial", "sequential")
         self.execution_mode_combo.addItem("Paralelo", "parallel")
         self.execution_mode_combo.currentIndexChanged.connect(lambda _index: self.queue_changed.emit())

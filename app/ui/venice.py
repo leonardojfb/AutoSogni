@@ -12,7 +12,7 @@ from uuid import uuid4
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QTextEdit, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -25,6 +25,7 @@ from app.venice.validation import (
     validate_prompt_and_images,
 )
 from app.ui.venice_batch import VeniceBatchWidget
+from app.ui.numeric_inputs import WheelSafeComboBox
 
 
 _MODEL_NAMES = {
@@ -106,7 +107,7 @@ class VeniceEditWidget(QWidget):
 
         model_row = QHBoxLayout()
         model_row.addWidget(QLabel("Model"))
-        self.model_combo = QComboBox()
+        self.model_combo = WheelSafeComboBox()
         self.model_combo.currentIndexChanged.connect(self._update_model_options)
         model_row.addWidget(self.model_combo)
         self.refresh_button = QPushButton("Refresh models")
@@ -125,13 +126,13 @@ class VeniceEditWidget(QWidget):
 
         options = QHBoxLayout()
         options.addWidget(QLabel("Aspect ratio"))
-        self.aspect_combo = QComboBox()
+        self.aspect_combo = WheelSafeComboBox()
         options.addWidget(self.aspect_combo)
         options.addWidget(QLabel("Resolution"))
-        self.resolution_combo = QComboBox()
+        self.resolution_combo = WheelSafeComboBox()
         options.addWidget(self.resolution_combo)
         options.addWidget(QLabel("Output format"))
-        self.output_format_combo = QComboBox()
+        self.output_format_combo = WheelSafeComboBox()
         self.output_format_combo.addItems(["png", "jpeg", "webp"])
         options.addWidget(self.output_format_combo)
         self.safe_mode_check = QCheckBox("Safe mode")

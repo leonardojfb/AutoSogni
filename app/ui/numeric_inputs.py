@@ -1,4 +1,9 @@
-from PySide6.QtWidgets import QDoubleSpinBox, QSpinBox
+from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QSpinBox
+
+
+class WheelSafeComboBox(QComboBox):
+    def wheelEvent(self, event) -> None:
+        event.ignore()
 
 
 class WheelSafeSpinBox(QSpinBox):
