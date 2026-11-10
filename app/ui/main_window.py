@@ -31,11 +31,13 @@ from app.ui.byteplus_references import BytePlusReferences
 from app.byteplus.media import prepare_snapshot
 from app.byteplus.uploads import BytePlusUploader
 from app.wavespeed.history import WaveSpeedHistoryStore
+from app.wavespeed.flux3_multi import prepare_flux3_multi_jobs, run_flux3_multi_jobs
 from app.wavespeed.flux_queue import FluxCampaign, FluxCampaignStore, FluxQueue, FluxQueueItem, FluxQueueRunner
 from app.wavespeed.queue import (
     QueueStatus,
     WaveSpeedCampaign,
     WaveSpeedCampaignStore,
+    WaveSpeedQueue,
     WaveSpeedQueueItem,
     WaveSpeedQueueStore,
 )
@@ -52,6 +54,9 @@ from app.wavespeed.validation import (
     FACE_SWAP_MODEL_ID,
     NANO_BANANA_PRO_MODEL_ID,
     QWEN_IMAGE_3_EDIT_MODEL_ID,
+    FLUX_3_KLEIN_BASE_EDIT_MODEL_ID,
+    QWEN_IMAGE_EDIT_2511_MODEL_ID,
+    FLUX_3_ASPECT_RATIOS,
     IMAGE_EDIT_ASPECT_RATIOS,
     build_reference_video_payload,
     build_seedance_payload,
@@ -60,6 +65,8 @@ from app.wavespeed.validation import (
     build_face_swap_payload,
     build_nano_banana_pro_payload,
     build_qwen_image_3_edit_payload,
+    build_flux_3_klein_base_edit_payload,
+    build_qwen_image_edit_2511_payload,
     validate_local_reference_file,
 )
 
@@ -153,7 +160,8 @@ class MainWindow(QMainWindow):
         self._wavespeed_queue_active = None
         self._wavespeed_task_id: str | None = None
         self._wavespeed_cancel_event = threading.Event()
-        self._wavespeed_uploaded: dict[str, dict] = {}
+        self._wavespeed_uploaded: dict[tuple[str, int, int], dict] = {}
+        self._wavespeed_upload_lock = threading.Lock()
         self.models: list[ModelDescriptor] = []
         self._selected_sogni_loras: list[list] = []
         self._sogni_lora_catalog: list[dict] = []
@@ -562,6 +570,22 @@ class MainWindow(QMainWindow):
         self._wavespeed_refresh_history()
         self._wavespeed_update_advanced_controls()
         self._wavespeed_model_changed()
+        for widget in self.wavespeed_reference_lists.values():
+            widget.model().rowsInserted.connect(self._wavespeed_invalidate_price)
+            widget.model().rowsRemoved.connect(self._wavespeed_invalidate_price)
+        for signal in (
+            self.wavespeed_prompt_edit.textChanged,
+            self.wavespeed_model_combo.currentIndexChanged,
+            self.wavespeed_resolution_combo.currentIndexChanged,
+            self.wavespeed_aspect_combo.currentIndexChanged,
+            self.wavespeed_duration_spin.valueChanged,
+            self.wavespeed_prompt_expansion_check.toggled,
+            self.wavespeed_audio_check.toggled,
+            self.wavespeed_safety_checker_check.toggled,
+            self.wavespeed_random_seed_check.toggled,
+            self.wavespeed_seed_spin.valueChanged,
+        ):
+            signal.connect(self._wavespeed_invalidate_price)
         return page
 
     def _wavespeed_model_changed(self) -> None:
@@ -800,29 +824,37 @@ class MainWindow(QMainWindow):
         self.image_tabs.addTab(self._flux_tab(), "Flux Edit")
         self.image_tabs.addTab(self._image_edit_tab("nano_banana"), "Nano Banana Pro")
         self.image_tabs.addTab(self._image_edit_tab("qwen_image"), "Qwen Image 3.0 Edit")
+        self.image_tabs.addTab(self._image_edit_tab("flux3"), "FLUX 3 Klein Base Edit")
+        self.image_tabs.addTab(self._image_edit_tab("qwen2511"), "Qwen Image Edit 2511")
         layout.addWidget(self.image_tabs)
         return page
 
     def _image_edit_tab(self, key: str) -> QWidget:
         nano_banana = key == "nano_banana"
-        model_id = NANO_BANANA_PRO_MODEL_ID if nano_banana else QWEN_IMAGE_3_EDIT_MODEL_ID
+        model_id = {"nano_banana": NANO_BANANA_PRO_MODEL_ID,
+                    "qwen_image": QWEN_IMAGE_3_EDIT_MODEL_ID,
+                    "flux3": FLUX_3_KLEIN_BASE_EDIT_MODEL_ID,
+                    "qwen2511": QWEN_IMAGE_EDIT_2511_MODEL_ID}[key]
         maximum = 14 if nano_banana else 3
         page = QWidget()
         layout = QVBoxLayout(page)
-        description = (
-            "Google Nano Banana Pro: edición con hasta 14 imágenes, salida hasta 4k y PNG o JPEG."
-            if nano_banana else
-            "Alibaba Qwen Image 3.0 Edit: edición con 1 a 3 imágenes, hasta 2k, expansión de prompt y seed."
-        )
+        description = {
+            "nano_banana": "Google Nano Banana Pro: edición con hasta 14 imágenes, salida hasta 4k y PNG o JPEG.",
+            "qwen_image": "Alibaba Qwen Image 3.0 Edit: edición con 1 a 3 imágenes, hasta 2k, expansión de prompt y seed.",
+            "flux3": "FLUX 3 Klein Base: edición con 1 a 3 imágenes, salida hasta 2k.",
+            "qwen2511": "Qwen Image Edit 2511: edición con 1 a 3 imágenes y tamaño opcional.",
+        }[key]
         layout.addWidget(QLabel(f"{model_id} · {description}"))
         prompt = QTextEdit()
         prompt.setPlaceholderText("Indicá qué debe cambiar y qué elementos deben conservarse.")
         layout.addWidget(QLabel("Prompt"))
         layout.addWidget(prompt)
+        single_inputs = QWidget()
+        single_layout = QVBoxLayout(single_inputs)
         images = QListWidget()
         images.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        layout.addWidget(QLabel(f"Imágenes de entrada (1–{maximum})"))
-        layout.addWidget(images)
+        single_layout.addWidget(QLabel(f"Imágenes de entrada (1–{maximum})"))
+        single_layout.addWidget(images)
         image_buttons = QHBoxLayout()
         add = QPushButton("Agregar imágenes")
         add.clicked.connect(lambda: self._image_edit_add_images(key))
@@ -834,18 +866,24 @@ class MainWindow(QMainWindow):
         move_down.clicked.connect(lambda: self._image_edit_move_image(key, 1))
         for button in (add, remove, move_up, move_down):
             image_buttons.addWidget(button)
-        layout.addLayout(image_buttons)
+        single_layout.addLayout(image_buttons)
+        if key == "flux3":
+            multi_toggle = QCheckBox("Multi foto generation")
+            layout.addWidget(multi_toggle)
+        layout.addWidget(single_inputs)
         options = QGridLayout()
         aspect = QComboBox()
         aspect.addItem("Usar la relación de la primera imagen", "")
-        for ratio in IMAGE_EDIT_ASPECT_RATIOS:
+        for ratio in (FLUX_3_ASPECT_RATIOS if key == "flux3" else IMAGE_EDIT_ASPECT_RATIOS):
             aspect.addItem(ratio, ratio)
         resolution = QComboBox()
-        resolution.addItems(["1k", "2k", "4k"] if nano_banana else ["1k", "2k"])
-        options.addWidget(QLabel("Relación"), 0, 0)
-        options.addWidget(aspect, 0, 1)
-        options.addWidget(QLabel("Resolución"), 1, 0)
-        options.addWidget(resolution, 1, 1)
+        resolution.addItems(["1k", "2k", "4k"] if nano_banana else
+                            ["1k", "1.5k", "2k"] if key == "flux3" else ["1k", "2k"])
+        if key != "qwen2511":
+            options.addWidget(QLabel("Relación"), 0, 0)
+            options.addWidget(aspect, 0, 1)
+            options.addWidget(QLabel("Resolución"), 1, 0)
+            options.addWidget(resolution, 1, 1)
         controls = {"prompt": prompt, "images": images, "aspect": aspect, "resolution": resolution,
                     "maximum": maximum, "model_id": model_id}
         if nano_banana:
@@ -865,7 +903,7 @@ class MainWindow(QMainWindow):
             self.nano_banana_format_combo = output_format
             self.nano_banana_sync_check = sync
             self.nano_banana_base64_check = base64_output
-        else:
+        elif key == "qwen_image":
             expansion = QCheckBox("Expandir prompt")
             expansion.setChecked(True)
             random_seed = QCheckBox("Seed aleatorio (-1)")
@@ -885,6 +923,31 @@ class MainWindow(QMainWindow):
             self.qwen_image_prompt_expansion_check = expansion
             self.qwen_image_random_seed_check = random_seed
             self.qwen_image_seed_spin = seed
+        else:
+            output_format = QComboBox()
+            output_format.addItems(["jpeg", "png", "webp"])
+            sync = QCheckBox("enable_sync_mode")
+            base64_output = QCheckBox("enable_base64_output")
+            random_seed = QCheckBox("Seed aleatorio (-1)")
+            random_seed.setChecked(True)
+            seed = WheelSafeSpinBox()
+            seed.setRange(0, 2_147_483_647)
+            seed.setDisabled(True)
+            random_seed.toggled.connect(seed.setDisabled)
+            options.addWidget(QLabel("Formato"), 2, 0)
+            options.addWidget(output_format, 2, 1)
+            options.addWidget(random_seed, 3, 0)
+            options.addWidget(seed, 3, 1)
+            options.addWidget(sync, 4, 0)
+            options.addWidget(base64_output, 4, 1)
+            controls.update({"output_format": output_format, "sync": sync, "base64": base64_output,
+                             "random_seed": random_seed, "seed": seed})
+            if key == "qwen2511":
+                size = QLineEdit()
+                size.setPlaceholderText("Opcional: 1024*768 (256–1536 por lado)")
+                options.addWidget(QLabel("Tamaño"), 0, 0)
+                options.addWidget(size, 0, 1)
+                controls["size"] = size
         layout.addLayout(options)
         output = QHBoxLayout()
         output_edit = QLineEdit(str(data_dir() / "wavespeed_outputs"))
@@ -903,12 +966,61 @@ class MainWindow(QMainWindow):
         actions.addWidget(estimate)
         actions.addWidget(price)
         actions.addWidget(generate)
-        layout.addLayout(actions)
+        single_actions = QWidget()
+        single_actions.setLayout(actions)
+        layout.addWidget(single_actions)
         status = QLabel("Listo.")
         raw = QTextEdit()
         raw.setReadOnly(True)
         layout.addWidget(status)
         layout.addWidget(raw)
+        if key == "flux3":
+            multi_panel = QWidget()
+            multi_layout = QVBoxLayout(multi_panel)
+            multi_layout.addWidget(QLabel("Ref 1 · una imagen distinta por job"))
+            multi_sources = QListWidget()
+            multi_sources.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            multi_layout.addWidget(multi_sources)
+            multi_buttons = QHBoxLayout()
+            multi_add = QPushButton("Seleccionar fotos para Ref 1")
+            multi_add.clicked.connect(self._flux3_multi_add_sources)
+            multi_remove = QPushButton("Quitar seleccionadas")
+            multi_remove.clicked.connect(self._flux3_multi_remove_sources)
+            multi_buttons.addWidget(multi_add)
+            multi_buttons.addWidget(multi_remove)
+            multi_layout.addLayout(multi_buttons)
+            fixed_inputs = QGridLayout()
+            multi_face = QLineEdit()
+            multi_face.setReadOnly(True)
+            multi_body = QLineEdit()
+            multi_body.setReadOnly(True)
+            for row, (label, field, role) in enumerate((("Ref 2 · cara fija", multi_face, "face"),
+                                                        ("Ref 3 · cuerpo fijo", multi_body, "body"))):
+                browse = QPushButton("Seleccionar")
+                browse.clicked.connect(lambda _checked=False, value=role: self._flux3_multi_choose_fixed(value))
+                fixed_inputs.addWidget(QLabel(label), row, 0)
+                fixed_inputs.addWidget(field, row, 1)
+                fixed_inputs.addWidget(browse, row, 2)
+            multi_layout.addLayout(fixed_inputs)
+            multi_generate = QPushButton("Generar lote · un job por Ref 1")
+            multi_generate.clicked.connect(self._flux3_multi_generate)
+            multi_layout.addWidget(multi_generate)
+            multi_status = QLabel("Listo.")
+            multi_layout.addWidget(multi_status)
+            multi_table = QTableWidget(0, 5)
+            multi_table.setHorizontalHeaderLabels(["Ref 1", "Estado", "Task", "Archivo", "Error"])
+            multi_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            multi_layout.addWidget(multi_table)
+            layout.addWidget(multi_panel)
+            multi_panel.setVisible(False)
+            multi_toggle.toggled.connect(lambda checked: (
+                single_inputs.setVisible(not checked), single_actions.setVisible(not checked),
+                status.setVisible(not checked), raw.setVisible(not checked),
+                multi_panel.setVisible(checked)))
+            controls.update({"multi_toggle": multi_toggle, "single_inputs": single_inputs,
+                             "multi_sources": multi_sources, "multi_face": multi_face,
+                             "multi_body": multi_body, "multi_generate": multi_generate,
+                             "multi_status": multi_status, "multi_table": multi_table})
         layout.addStretch()
         controls.update({"output": output_edit, "price": price, "generate": generate, "status": status, "raw": raw})
         self._image_edit_controls[key] = controls
@@ -931,6 +1043,90 @@ class MainWindow(QMainWindow):
             images.addItem(item)
             existing.add(path)
         self._refresh_reference_positions(images)
+
+    def _flux3_multi_add_sources(self) -> None:
+        controls = self._image_edit_controls["flux3"]
+        images = controls["multi_sources"]
+        selected, _ = QFileDialog.getOpenFileNames(
+            self, "Seleccionar fotos para Ref 1", filter="Images (*.png *.jpg *.jpeg *.webp *.gif)"
+        )
+        existing = {images.item(index).data(Qt.UserRole) for index in range(images.count())}
+        for name in selected:
+            path = str(Path(name).resolve())
+            if path in existing:
+                continue
+            item = QListWidgetItem(Path(path).name)
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            images.addItem(item)
+            existing.add(path)
+
+    def _flux3_multi_remove_sources(self) -> None:
+        images = self._image_edit_controls["flux3"]["multi_sources"]
+        for item in images.selectedItems():
+            images.takeItem(images.row(item))
+
+    def _flux3_multi_choose_fixed(self, role: str) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar cara" if role == "face" else "Seleccionar cuerpo",
+            filter="Images (*.png *.jpg *.jpeg *.webp *.gif)",
+        )
+        if selected:
+            self._image_edit_controls["flux3"][f"multi_{role}"].setText(str(Path(selected).resolve()))
+
+    def _flux3_multi_snapshot(self) -> list[dict]:
+        controls = self._image_edit_controls["flux3"]
+        snapshot = self._image_edit_snapshot("flux3")
+        sources = [controls["multi_sources"].item(index).data(Qt.UserRole)
+                   for index in range(controls["multi_sources"].count())]
+        settings = {name: value for name, value in snapshot.items()
+                    if name not in {"images", "prompt", "output_dir"}}
+        return prepare_flux3_multi_jobs(
+            sources=sources, face=controls["multi_face"].text().strip(),
+            body=controls["multi_body"].text().strip(), prompt=snapshot["prompt"],
+            settings=settings, output_dir=snapshot["output_dir"],
+        )
+
+    def _flux3_multi_generate(self) -> None:
+        controls = self._image_edit_controls["flux3"]
+        try:
+            jobs = self._flux3_multi_snapshot()
+        except Exception as exc:
+            controls["multi_status"].setText(f"Error: {exc}")
+            return
+        table = controls["multi_table"]
+        table.setRowCount(len(jobs))
+        for row, job in enumerate(jobs):
+            values = (Path(job["source"]).name, "Pendiente", "", "", "")
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(Qt.UserRole, job["source"])
+                    item.setToolTip(job["source"])
+                table.setItem(row, column, item)
+        controls["multi_generate"].setEnabled(False)
+        controls["multi_status"].setText(f"Procesando {len(jobs)} jobs...")
+
+        def update(job: dict) -> None:
+            self._post_wavespeed_event("flux3_multi_update", job)
+            if job.get("task_id"):
+                try:
+                    self.wavespeed_history.add({
+                        "task_id": job["task_id"], "model_id": FLUX_3_KLEIN_BASE_EDIT_MODEL_ID,
+                        "status": job["status"], "output_file": job["output_file"],
+                        "error": job["error"], "payload": job.get("payload", {}),
+                        "created_at": job["created_at"],
+                    })
+                except Exception as exc:
+                    self._post_wavespeed_event("flux3_multi_history_error", exc)
+
+        def task():
+            return run_flux3_multi_jobs(
+                jobs, self.wavespeed, upload_file=self._wavespeed_upload_cached,
+                save_output=self._wavespeed_save_output, on_update=update,
+            )
+
+        self._run_wavespeed_worker(task, "flux3_multi_done")
 
     def _image_edit_remove_images(self, key: str) -> None:
         images = self._image_edit_controls[key]["images"]
@@ -959,22 +1155,33 @@ class MainWindow(QMainWindow):
         snapshot = {
             "prompt": controls["prompt"].toPlainText(),
             "images": [controls["images"].item(index).data(Qt.UserRole) for index in range(controls["images"].count())],
-            "aspect_ratio": controls["aspect"].currentData() or "",
-            "resolution": controls["resolution"].currentText(),
             "output_dir": controls["output"].text().strip(),
         }
+        if key != "qwen2511":
+            snapshot.update({"aspect_ratio": controls["aspect"].currentData() or "",
+                             "resolution": controls["resolution"].currentText()})
         if key == "nano_banana":
             snapshot.update({"output_format": controls["output_format"].currentText(),
                              "enable_sync_mode": controls["sync"].isChecked(),
                              "enable_base64_output": controls["base64"].isChecked()})
-        else:
+        elif key == "qwen_image":
             snapshot.update({"enable_prompt_expansion": controls["expansion"].isChecked(),
                              "seed": -1 if controls["random_seed"].isChecked() else controls["seed"].value()})
+        else:
+            snapshot.update({"output_format": controls["output_format"].currentText(),
+                             "seed": -1 if controls["random_seed"].isChecked() else controls["seed"].value(),
+                             "enable_sync_mode": controls["sync"].isChecked(),
+                             "enable_base64_output": controls["base64"].isChecked()})
+            if key == "qwen2511":
+                snapshot["size"] = controls["size"].text().strip()
         return snapshot
 
     @staticmethod
     def _image_edit_builder(key: str):
-        return build_nano_banana_pro_payload if key == "nano_banana" else build_qwen_image_3_edit_payload
+        return {"nano_banana": build_nano_banana_pro_payload,
+                "qwen_image": build_qwen_image_3_edit_payload,
+                "flux3": build_flux_3_klein_base_edit_payload,
+                "qwen2511": build_qwen_image_edit_2511_payload}[key]
 
     def _image_edit_upload_and_build(self, key: str, snapshot: dict) -> dict:
         builder = self._image_edit_builder(key)
@@ -1618,57 +1825,52 @@ class MainWindow(QMainWindow):
         self.wavespeed_reference_labels[kind].setText(f"{title} ({widget.count()}/{limits[kind]})")
 
     def _wavespeed_add_current_to_queue(self) -> None:
-        image_paths = [
-            str(self.wavespeed_reference_lists["reference_images"].item(index).data(Qt.UserRole))
-            for index in range(self.wavespeed_reference_lists["reference_images"].count())
-        ]
-        video_paths = [
-            str(self.wavespeed_reference_lists["reference_videos"].item(index).data(Qt.UserRole))
-            for index in range(self.wavespeed_reference_lists["reference_videos"].count())
-        ]
-        if len(image_paths) != 1:
-            self.wavespeed_status_label.setText("Seleccioná exactamente un frame para la cola.")
-            return
-        if not video_paths:
-            self.wavespeed_status_label.setText("Agregá al menos un video antes de enviarlo a la cola.")
-            return
-
-        frame_path = image_paths[0]
-        queue = self.wavespeed_queue_widget.queue()
-        if queue.frame_path and Path(queue.frame_path).name.casefold() != Path(frame_path).name.casefold():
-            self.wavespeed_status_label.setText(
-                f"El frame {Path(frame_path).name} es distinto al de la cola ({Path(queue.frame_path).name})."
-            )
-            return
-
         snapshot = self._wavespeed_snapshot()
-        queue.frame_path = frame_path
-        queue.output_dir = snapshot["output_dir"]
-        existing_videos = {str(Path(item.video_path).resolve()).casefold() for item in queue.items}
-        added_count = 0
-        for video_path in video_paths:
-            if str(Path(video_path).resolve()).casefold() in existing_videos:
-                continue
-            queue.items.append(
-                WaveSpeedQueueItem(
-                    video_path=video_path,
-                    prompt=snapshot["prompt"],
-                    resolution=snapshot["resolution"],
-                    aspect_ratio=snapshot["aspect_ratio"],
+        model_id = snapshot["model_id"]
+        if model_id not in {WAN_MODEL_ID, SEEDANCE_MODEL_ID}:
+            self.wavespeed_status_label.setText("Este modelo no admite la cola multimodal.")
+            return
+        references = {kind: list(snapshot[kind]) for kind in
+                      ("reference_images", "reference_videos", "reference_audios")}
+        try:
+            if model_id == WAN_MODEL_ID:
+                build_reference_video_payload(
+                    prompt=snapshot["prompt"], **references,
+                    resolution=snapshot["resolution"], aspect_ratio=snapshot["aspect_ratio"],
                     duration=snapshot["duration"],
                     enable_prompt_expansion=snapshot["enable_prompt_expansion"],
-                    enable_audio=snapshot["enable_audio"],
-                    seed=snapshot["seed"],
-                    model_id=snapshot["model_id"],
+                    enable_audio=snapshot["enable_audio"], seed=snapshot["seed"],
                 )
-            )
-            existing_videos.add(str(Path(video_path).resolve()).casefold())
-            added_count += 1
-        self.wavespeed_queue_widget.load_queue(queue)
-        self._save_wavespeed_queue()
-        self.wavespeed_status_label.setText(
-            f"{added_count} job(s) agregado(s) a la cola del frame {Path(frame_path).name}."
+            else:
+                build_seedance_payload(
+                    prompt=snapshot["prompt"], **references,
+                    resolution=snapshot["resolution"], aspect_ratio=snapshot["aspect_ratio"],
+                    duration=snapshot["duration"],
+                    enable_web_search=snapshot["enable_prompt_expansion"],
+                    generate_audio=snapshot["enable_audio"],
+                    safety_checker=snapshot["safety_checker"],
+                )
+        except Exception as exc:
+            self.wavespeed_status_label.setText(f"Error: {exc}")
+            return
+
+        item = WaveSpeedQueueItem(
+            prompt=snapshot["prompt"], **references,
+            resolution=snapshot["resolution"], aspect_ratio=snapshot["aspect_ratio"],
+            duration=snapshot["duration"],
+            enable_prompt_expansion=snapshot["enable_prompt_expansion"],
+            enable_audio=snapshot["enable_audio"], seed=snapshot["seed"],
+            model_id=model_id, safety_checker=snapshot["safety_checker"],
         )
+        queue = self.wavespeed_queue_widget.queue()
+        queue.output_dir = snapshot["output_dir"]
+        self.wavespeed_queue_widget.append_item(item)
+        if self._wavespeed_queue_running and self._wavespeed_queue_active is not None:
+            self._wavespeed_queue_active.items.append(WaveSpeedQueueItem.from_dict(item.to_dict()))
+            self._persist_wavespeed_campaign_queue(self._wavespeed_queue_active)
+        else:
+            self._save_wavespeed_queue()
+        self.wavespeed_status_label.setText("Job agregado a la cola con sus referencias y prompt.")
 
     def _wavespeed_remove_files(self, kind: str) -> None:
         widget = self.wavespeed_reference_lists[kind]
@@ -1722,6 +1924,12 @@ class MainWindow(QMainWindow):
             "output_dir": self.wavespeed_output_edit.text().strip(),
         }
 
+    def _wavespeed_price_signature(self) -> str:
+        return json.dumps(self._wavespeed_snapshot(), sort_keys=True, ensure_ascii=False)
+
+    def _wavespeed_invalidate_price(self, *_args) -> None:
+        self.wavespeed_price_label.setText("Precio: no estimado")
+
     def _wavespeed_upload_and_build(self, snapshot: dict) -> tuple[dict, dict[str, dict]]:
         model_id = snapshot["model_id"]
         if model_id == SEEDANCE_MODEL_ID:
@@ -1740,16 +1948,10 @@ class MainWindow(QMainWindow):
         for kind in media_kinds:
             urls = []
             for file_name in snapshot[kind]:
-                cache_key = str(Path(file_name).resolve())
-                validate_local_reference_file(Path(cache_key), kind)
-                cached = self._wavespeed_uploaded.get(cache_key)
-                if cached:
-                    media = cached
-                else:
-                    self._post_wavespeed_event("status", f"Subiendo {Path(file_name).name}...")
-                    media = self.wavespeed.upload_file(Path(file_name))
-                    self._wavespeed_uploaded[cache_key] = media
-                uploaded[cache_key] = media
+                path = Path(file_name).resolve()
+                validate_local_reference_file(path, kind)
+                media = self._wavespeed_upload_cached(path)
+                uploaded[str(path)] = media
                 urls.append(media["download_url"])
             snapshot[kind] = urls
         common = dict(prompt=snapshot["prompt"], reference_images=snapshot["reference_images"],
@@ -1921,6 +2123,8 @@ class MainWindow(QMainWindow):
         self._load_wavespeed_campaigns()
 
     def _save_wavespeed_queue(self) -> None:
+        if self._wavespeed_queue_running:
+            return
         if not hasattr(self, "wavespeed_queue_widget"):
             return
         queue = self.wavespeed_queue_widget.queue()
@@ -1949,21 +2153,30 @@ class MainWindow(QMainWindow):
             self.wavespeed_campaign_store.save(campaign, active=True)
 
     def _validate_wavespeed_queue(self, queue) -> None:
-        if not queue.frame_path:
-            raise ValueError("Seleccioná un frame compartido.")
-        validate_local_reference_file(Path(queue.frame_path), "reference_images")
         if not queue.items:
-            raise ValueError("Agregá al menos un video a la cola.")
+            raise ValueError("Agregá al menos un job a la cola.")
         for item in queue.items:
-            validate_local_reference_file(Path(item.video_path), "reference_videos")
+            if item.status not in {QueueStatus.PENDING, QueueStatus.PAUSED}:
+                continue
+            if item.task_id:
+                continue
+            references = WaveSpeedQueueRunner._references(item, queue)
+            for kind, paths in references.items():
+                for name in paths:
+                    validate_local_reference_file(Path(name), kind)
             if not item.prompt.strip():
                 raise ValueError(f"El ítem {item.item_id} no tiene prompt.")
             if item.model_id == SEEDANCE_MODEL_ID:
-                build_seedance_payload(prompt=item.prompt, reference_images=["frame"],
-                    reference_videos=["video"], resolution=item.resolution,
+                build_seedance_payload(prompt=item.prompt, **references, resolution=item.resolution,
                     aspect_ratio=item.aspect_ratio, duration=item.duration,
-                    enable_web_search=item.enable_prompt_expansion, generate_audio=item.enable_audio)
-            elif item.model_id != WAN_MODEL_ID:
+                    enable_web_search=item.enable_prompt_expansion, generate_audio=item.enable_audio,
+                    safety_checker=item.safety_checker)
+            elif item.model_id == WAN_MODEL_ID:
+                build_reference_video_payload(prompt=item.prompt, **references,
+                    resolution=item.resolution, aspect_ratio=item.aspect_ratio,
+                    duration=item.duration, enable_prompt_expansion=item.enable_prompt_expansion,
+                    enable_audio=item.enable_audio, seed=item.seed)
+            else:
                 raise ValueError(f"Modelo de cola no admitido: {item.model_id}")
 
     def _start_wavespeed_queue(self) -> None:
@@ -1976,6 +2189,7 @@ class MainWindow(QMainWindow):
             self.wavespeed_queue_widget.set_error(str(exc))
             return
 
+        queue = WaveSpeedQueue.from_dict(queue.to_dict())
         queue.paused = False
         self._wavespeed_queue_active = queue
         self._wavespeed_queue_cancel_event.clear()
@@ -2044,14 +2258,20 @@ class MainWindow(QMainWindow):
         self._post_wavespeed_event("queue_item", item)
 
     def _wavespeed_upload_cached(self, path: Path) -> dict:
-        cache_key = str(Path(path).resolve())
-        cached = self._wavespeed_uploaded.get(cache_key)
-        if cached:
-            return cached
-        self._post_wavespeed_event("status", f"Subiendo {Path(path).name}...")
-        media = self.wavespeed.upload_file(Path(path))
-        self._wavespeed_uploaded[cache_key] = media
-        return media
+        path = Path(path).resolve()
+        stat = path.stat()
+        cache_key = (str(path), stat.st_size, stat.st_mtime_ns)
+        with self._wavespeed_upload_lock:
+            cached = self._wavespeed_uploaded.get(cache_key)
+            if cached:
+                return cached
+            self._post_wavespeed_event("status", f"Subiendo {path.name}...")
+            media = self.wavespeed.upload_file(path)
+            after = path.stat()
+            if (after.st_size, after.st_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
+                raise ValueError(f"La referencia cambió durante la subida: {path.name}")
+            self._wavespeed_uploaded[cache_key] = media
+            return media
 
     def _pause_wavespeed_queue(self) -> None:
         if not self._wavespeed_queue_running or self._wavespeed_queue_active is None:
@@ -2061,6 +2281,8 @@ class MainWindow(QMainWindow):
         self.wavespeed_queue_widget.set_error("La cola se pausará después del ítem actual.")
 
     def _retry_wavespeed_item(self, item_id: str) -> None:
+        if self._wavespeed_queue_running:
+            return
         queue = self.wavespeed_queue_widget.queue()
         item = next((value for value in queue.items if value.item_id == item_id), None)
         if item is None or item.status == QueueStatus.RUNNING:
@@ -2073,6 +2295,8 @@ class MainWindow(QMainWindow):
             self._start_wavespeed_queue()
 
     def _retry_wavespeed_failed(self) -> None:
+        if self._wavespeed_queue_running:
+            return
         queue = self.wavespeed_queue_widget.queue()
         for item in queue.items:
             if item.status == QueueStatus.FAILED:
@@ -2085,6 +2309,8 @@ class MainWindow(QMainWindow):
             self._start_wavespeed_queue()
 
     def _clear_wavespeed_completed(self) -> None:
+        if self._wavespeed_queue_running:
+            return
         queue = self.wavespeed_queue_widget.queue()
         queue.items = [item for item in queue.items if item.status != QueueStatus.COMPLETED]
         self.wavespeed_queue_widget.load_queue(queue)
@@ -2092,11 +2318,14 @@ class MainWindow(QMainWindow):
 
     def _wavespeed_estimate_price(self) -> None:
         snapshot = self._wavespeed_snapshot()
+        signature = self._wavespeed_price_signature()
         self._wavespeed_start_busy("Subiendo referencias para estimar precio...")
+        self.wavespeed_price_label.setText("Precio: calculando...")
 
         def task():
             payload, _uploaded = self._wavespeed_upload_and_build(snapshot)
-            return self.wavespeed.estimate_price(payload, model_id=snapshot["model_id"])
+            value = self.wavespeed.estimate_price(payload, model_id=snapshot["model_id"])
+            return {"signature": signature, "value": value}
 
         self._run_wavespeed_worker(task, "price")
 
@@ -2650,7 +2879,31 @@ class MainWindow(QMainWindow):
     def _handle_wavespeed_event(self, kind: str, payload) -> None:
         if kind == "status":
             self.wavespeed_status_label.setText(str(payload))
-        elif kind in {"nano_banana_price", "qwen_image_price"}:
+        elif kind == "flux3_multi_update":
+            controls = self._image_edit_controls["flux3"]
+            table = controls["multi_table"]
+            for row in range(table.rowCount()):
+                if table.item(row, 0).data(Qt.UserRole) == payload["source"]:
+                    values = (payload["status"], payload.get("task_id", ""),
+                              payload.get("output_file", ""), payload.get("error", ""))
+                    for column, value in enumerate(values, 1):
+                        table.item(row, column).setText(str(value))
+                    break
+        elif kind == "flux3_multi_history_error":
+            self._image_edit_controls["flux3"]["multi_status"].setText(f"Error al guardar historial: {payload}")
+        elif kind == "flux3_multi_done":
+            controls = self._image_edit_controls["flux3"]
+            controls["multi_generate"].setEnabled(True)
+            if isinstance(payload, Exception):
+                controls["multi_status"].setText(f"Error: {payload}")
+            else:
+                completed = sum(job["status"] == "completed" for job in payload)
+                failed = sum(job["status"] == "failed" for job in payload)
+                controls["multi_status"].setText(
+                    f"Lote finalizado: {completed} completados, {failed} fallidos."
+                )
+                self._wavespeed_refresh_history()
+        elif kind in {"nano_banana_price", "qwen_image_price", "flux3_price", "qwen2511_price"}:
             key = kind.removesuffix("_price")
             label = self._image_edit_controls[key]["price"]
             if isinstance(payload, Exception):
@@ -2658,7 +2911,7 @@ class MainWindow(QMainWindow):
             else:
                 amount = payload.get("discounted_price", payload.get("price", "?"))
                 label.setText(f"Precio estimado: ${amount} USD")
-        elif kind in {"nano_banana_generate", "qwen_image_generate"}:
+        elif kind in {"nano_banana_generate", "qwen_image_generate", "flux3_generate", "qwen2511_generate"}:
             key = kind.removesuffix("_generate")
             controls = self._image_edit_controls[key]
             controls["generate"].setEnabled(True)
@@ -2733,6 +2986,10 @@ class MainWindow(QMainWindow):
         elif kind == "price":
             self.wavespeed_generate_button.setEnabled(True)
             self.wavespeed_progress.setVisible(False)
+            if isinstance(payload, dict) and "signature" in payload:
+                if payload["signature"] != self._wavespeed_price_signature():
+                    return
+                payload = payload["value"]
             if isinstance(payload, Exception):
                 self.wavespeed_price_label.setText(f"Precio: error: {payload}")
             else:
@@ -2764,13 +3021,23 @@ class MainWindow(QMainWindow):
                 self.wavespeed_queue_widget.set_total_price(float(payload))
                 self.wavespeed_queue_widget.set_error("Costos estimados.")
         elif kind == "queue_finished":
+            finished_queue = self._wavespeed_queue_active
+            if finished_queue is not None:
+                for item in finished_queue.items:
+                    self.wavespeed_queue_widget.set_item_update(item)
             self._wavespeed_queue_running = False
             self._wavespeed_queue_active = None
             self.wavespeed_queue_widget.set_running(False)
+            self.wavespeed_queue_add_button.setEnabled(True)
             if isinstance(payload, Exception):
                 self.wavespeed_queue_widget.set_error(str(payload))
             else:
                 self.wavespeed_queue_widget.set_error("Cola finalizada.")
+                if finished_queue is not None and not finished_queue.paused and any(
+                    item.status in {QueueStatus.PENDING, QueueStatus.PAUSED}
+                    for item in finished_queue.items
+                ):
+                    self._start_wavespeed_queue()
 
 
 if Qt is not None:

@@ -14,6 +14,8 @@ from app.wavespeed.validation import (
     FACE_SWAP_MODEL_ID,
     NANO_BANANA_PRO_MODEL_ID,
     QWEN_IMAGE_3_EDIT_MODEL_ID,
+    FLUX_3_KLEIN_BASE_EDIT_MODEL_ID,
+    QWEN_IMAGE_EDIT_2511_MODEL_ID,
     build_seedance_payload,
     build_seedance_i2v_spicy_payload,
     build_flux_payload,
@@ -152,6 +154,12 @@ def test_qwen_image_3_edit_uses_only_its_documented_edit_controls():
                                 "enable_sync_mode": False, "enable_base64_output": False}),
     (QWEN_IMAGE_3_EDIT_MODEL_ID, {"prompt": "Edit", "images": ["https://cdn/image.png"],
                                   "resolution": "1k", "enable_prompt_expansion": False, "seed": -1}),
+    (FLUX_3_KLEIN_BASE_EDIT_MODEL_ID, {"prompt": "Edit", "images": ["https://cdn/image.png"],
+                                       "resolution": "1.5k", "output_format": "webp", "seed": -1,
+                                       "enable_sync_mode": False, "enable_base64_output": False}),
+    (QWEN_IMAGE_EDIT_2511_MODEL_ID, {"prompt": "Edit", "images": ["https://cdn/image.png"],
+                                     "size": "1024*768", "output_format": "jpeg", "seed": -1,
+                                     "enable_sync_mode": False, "enable_base64_output": False}),
 ])
 def test_client_uses_selected_model_for_submit_and_price(model_id, payload):
     seen = []

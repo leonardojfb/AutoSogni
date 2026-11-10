@@ -234,6 +234,19 @@ def test_store_recovers_inflight_items_as_pending_without_losing_task_id(tmp_pat
     assert restored.items[0].task_id == "pred-1"
 
 
+def test_campaign_store_recovers_inflight_item_without_new_submission(tmp_path):
+    store = WaveSpeedCampaignStore(tmp_path / "campaigns.json")
+    campaign = WaveSpeedCampaign(queue=WaveSpeedQueue(items=[
+        WaveSpeedQueueItem(prompt="Scene", reference_images=["frame.png"],
+                           status=QueueStatus.RUNNING, task_id="pred-existing"),
+    ]))
+    store.save(campaign, active=True)
+
+    campaigns, _active_id = store.load()
+    assert campaigns[0].queue.items[0].status == QueueStatus.PENDING
+    assert campaigns[0].queue.items[0].task_id == "pred-existing"
+
+
 def test_runner_recovers_existing_task_without_duplicate_submission(tmp_path):
     events = []
     client = FakeWaveSpeedClient(
@@ -329,3 +342,115 @@ def test_runner_parallel_submits_all_jobs_before_polling(tmp_path):
     assert len(submit_indexes) == 2
     assert len(poll_indexes) == 2
     assert max(submit_indexes) < min(poll_indexes)
+
+
+def test_runner_parallel_keeps_each_prompt_with_its_video_and_shared_frame(tmp_path):
+    from app.wavespeed.queue_runner import WaveSpeedQueueRunner
+
+    submitted = {}
+
+    class Client:
+        def estimate_price(self, payload):
+            return {"price": 0.5}
+
+        def submit(self, payload):
+            submitted[payload["prompt"]] = payload
+            return WaveSpeedPrediction(payload["prompt"], "completed", outputs=["output"])
+
+    queue = WaveSpeedQueue(
+        frame_path="frame.png", output_dir=str(tmp_path), execution_mode="parallel",
+        items=[
+            WaveSpeedQueueItem(video_path="first.mp4", prompt="First scene"),
+            WaveSpeedQueueItem(video_path="second.mp4", prompt="Second scene"),
+        ],
+    )
+    WaveSpeedQueueRunner(
+        Client(), upload_file=lambda path: {"download_url": f"https://cdn/{path.name}"},
+        save_output=lambda *_args: "output.mp4",
+    ).run(queue, parallel=True)
+
+    assert {prompt: (payload["reference_images"], payload["reference_videos"])
+            for prompt, payload in submitted.items()} == {
+        "First scene": (["https://cdn/frame.png"], ["https://cdn/first.mp4"]),
+        "Second scene": (["https://cdn/frame.png"], ["https://cdn/second.mp4"]),
+    }
+
+
+def test_runner_uses_each_jobs_own_multimodal_references(tmp_path):
+    from app.wavespeed.queue_runner import WaveSpeedQueueRunner
+
+    submitted = {}
+
+    class Client:
+        def estimate_price(self, payload):
+            return {"price": 0.5}
+
+        def submit(self, payload):
+            submitted[payload["prompt"]] = payload
+            return WaveSpeedPrediction(payload["prompt"], "completed", outputs=["output"])
+
+    queue = WaveSpeedQueue(output_dir=str(tmp_path), items=[
+        WaveSpeedQueueItem(prompt="First", reference_images=["first.png"],
+                           reference_videos=["first.mp4"]),
+        WaveSpeedQueueItem(prompt="Second", reference_images=["second.png"],
+                           reference_videos=["second.mp4"], reference_audios=["second.mp3"]),
+    ])
+    store = WaveSpeedQueueStore(tmp_path / "queue.json")
+    store.save(queue)
+    restored = store.load()
+    WaveSpeedQueueRunner(
+        Client(), upload_file=lambda path: {"download_url": f"https://cdn/{path.name}"},
+        save_output=lambda *_args: "output.mp4",
+    ).run(restored)
+
+    assert submitted["First"]["reference_images"] == ["https://cdn/first.png"]
+    assert submitted["First"]["reference_videos"] == ["https://cdn/first.mp4"]
+    assert submitted["Second"]["reference_images"] == ["https://cdn/second.png"]
+    assert submitted["Second"]["reference_videos"] == ["https://cdn/second.mp4"]
+    assert submitted["Second"]["reference_audios"] == ["https://cdn/second.mp3"]
+
+
+def test_runner_reuploads_reference_changed_between_jobs(tmp_path):
+    from app.wavespeed.queue_runner import WaveSpeedQueueRunner
+
+    reference = tmp_path / "frame.png"
+    reference.write_bytes(b"first")
+    uploads = []
+    submitted = []
+
+    class Client:
+        def estimate_price(self, payload):
+            return {"price": 0.5}
+
+        def submit(self, payload):
+            submitted.append(payload)
+            if len(submitted) == 1:
+                reference.write_bytes(b"second version")
+            return WaveSpeedPrediction(str(len(submitted)), "completed", outputs=["output"])
+
+    queue = WaveSpeedQueue(items=[
+        WaveSpeedQueueItem(prompt="First", reference_images=[str(reference)]),
+        WaveSpeedQueueItem(prompt="Second", reference_images=[str(reference)]),
+    ])
+
+    def upload(path):
+        uploads.append(path.read_bytes())
+        return {"download_url": f"https://cdn/{len(uploads)}"}
+
+    WaveSpeedQueueRunner(Client(), upload_file=upload,
+                         save_output=lambda *_args: "output.mp4").run(queue)
+
+    assert uploads == [b"first", b"second version"]
+    assert [row["reference_images"] for row in submitted] == [
+        ["https://cdn/1"], ["https://cdn/2"]]
+
+
+def test_new_text_only_job_does_not_inherit_legacy_shared_frame():
+    from app.wavespeed.queue_runner import WaveSpeedQueueRunner
+
+    queue = WaveSpeedQueue(frame_path="old-frame.png", items=[
+        WaveSpeedQueueItem(prompt="Text only", model_id=SEEDANCE_MODEL_ID),
+    ])
+    references = WaveSpeedQueueRunner._references(queue.items[0], queue)
+
+    assert references == {"reference_images": [], "reference_videos": [], "reference_audios": []}

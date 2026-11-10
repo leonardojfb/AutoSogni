@@ -11,6 +11,9 @@ FLUX_MODEL_ID = "wavespeed-ai/flux-2-klein-9b/edit"
 FACE_SWAP_MODEL_ID = "wavespeed-ai/image-face-swap"
 NANO_BANANA_PRO_MODEL_ID = "google/nano-banana-pro/edit"
 QWEN_IMAGE_3_EDIT_MODEL_ID = "alibaba/qwen-image-3.0/edit"
+FLUX_3_KLEIN_BASE_EDIT_MODEL_ID = "wavespeed-ai/flux-3-klein-image-base/edit"
+QWEN_IMAGE_EDIT_2511_MODEL_ID = "wavespeed-ai/qwen-image/edit-2511"
+FLUX_3_ASPECT_RATIOS = ("1:1", "1:2", "2:1", "1:3", "3:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "9:21", "21:9")
 RESOLUTIONS = ("480p", "720p", "1080p")
 ASPECT_RATIOS = ("16:9", "9:16", "1:1", "4:3", "3:4")
 IMAGE_EDIT_ASPECT_RATIOS = ("1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9")
@@ -298,4 +301,53 @@ def build_qwen_image_3_edit_payload(*, prompt: str, images: list[str], resolutio
     }
     if aspect_ratio:
         payload["aspect_ratio"] = aspect_ratio
+    return payload
+
+
+def build_flux_3_klein_base_edit_payload(*, prompt: str, images: list[str],
+                                         aspect_ratio: str = "", resolution: str = "1k",
+                                         output_format: str = "jpeg", seed: int = -1,
+                                         enable_sync_mode: bool = False,
+                                         enable_base64_output: bool = False) -> dict[str, Any]:
+    if not prompt.strip() or not 1 <= len(images) <= 3:
+        raise ValueError("FLUX 3 requires a prompt and 1 to 3 images.")
+    if aspect_ratio and aspect_ratio not in FLUX_3_ASPECT_RATIOS:
+        raise ValueError("Invalid FLUX 3 aspect ratio.")
+    if resolution not in {"1k", "1.5k", "2k"}:
+        raise ValueError("FLUX 3 resolution must be 1k, 1.5k, or 2k.")
+    if output_format not in {"jpeg", "png", "webp"}:
+        raise ValueError("Invalid FLUX 3 output format.")
+    if seed != -1 and not 0 <= seed <= 2_147_483_647:
+        raise ValueError("Invalid FLUX 3 seed.")
+    payload = {"prompt": prompt.strip(), "images": list(images), "resolution": resolution,
+               "output_format": output_format, "seed": seed,
+               "enable_sync_mode": bool(enable_sync_mode),
+               "enable_base64_output": bool(enable_base64_output)}
+    if aspect_ratio:
+        payload["aspect_ratio"] = aspect_ratio
+    return payload
+
+
+def build_qwen_image_edit_2511_payload(*, prompt: str, images: list[str], size: str = "",
+                                       output_format: str = "jpeg", seed: int = -1,
+                                       enable_sync_mode: bool = False,
+                                       enable_base64_output: bool = False) -> dict[str, Any]:
+    if not prompt.strip() or not 1 <= len(images) <= 3:
+        raise ValueError("Qwen 2511 requires a prompt and 1 to 3 images.")
+    if output_format not in {"jpeg", "png", "webp"}:
+        raise ValueError("Invalid Qwen 2511 output format.")
+    if seed != -1 and not 0 <= seed <= 2_147_483_647:
+        raise ValueError("Invalid Qwen 2511 seed.")
+    if size:
+        try:
+            width, height = (int(part) for part in size.lower().replace(" ", "").split("*"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Qwen 2511 size must be WIDTH*HEIGHT.") from exc
+        if not 256 <= width <= 1536 or not 256 <= height <= 1536:
+            raise ValueError("Qwen 2511 dimensions must be 256 to 1536 pixels.")
+    payload = {"prompt": prompt.strip(), "images": list(images), "output_format": output_format,
+               "seed": seed, "enable_sync_mode": bool(enable_sync_mode),
+               "enable_base64_output": bool(enable_base64_output)}
+    if size:
+        payload["size"] = size
     return payload

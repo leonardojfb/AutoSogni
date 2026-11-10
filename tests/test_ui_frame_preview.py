@@ -3,7 +3,7 @@ import json
 import time
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QMessageBox
+from PySide6.QtWidgets import QApplication, QLabel, QListWidgetItem, QMessageBox, QAbstractItemView
 
 from app.core.campaign_manager import CampaignManager
 from app.database.db import Database
@@ -12,6 +12,7 @@ from app.sogni.auth import ApiKeyStore
 from app.sogni.client import SogniClient
 from app.sogni.schemas import ModelDescriptor
 from app.ui.main_window import MainWindow
+from app.ui.wavespeed_queue import WaveSpeedQueueWidget
 from app.wavespeed.queue import (
     QueueStatus,
     WaveSpeedCampaign,
@@ -496,7 +497,122 @@ def test_image_edit_tabs_upload_model_specific_payloads(tmp_path: Path):
     }
     assert {window.image_tabs.tabText(index) for index in range(window.image_tabs.count())} >= {
         "Face Swap", "Flux Edit", "Nano Banana Pro", "Qwen Image 3.0 Edit",
+        "FLUX 3 Klein Base Edit", "Qwen Image Edit 2511",
     }
+
+    for key, prompt in (("flux3", "Make it blue"), ("qwen2511", "Make it red")):
+        controls = window._image_edit_controls[key]
+        item = QListWidgetItem(source.name)
+        item.setData(Qt.UserRole, str(source))
+        controls["images"].addItem(item)
+        controls["prompt"].setPlainText(prompt)
+        controls["output_format"].setCurrentText("webp")
+        controls["random_seed"].setChecked(False)
+        controls["seed"].setValue(42)
+
+    flux3 = window._image_edit_controls["flux3"]
+    flux3["aspect"].setCurrentText("1:2")
+    flux3["resolution"].setCurrentText("1.5k")
+    assert window._image_edit_upload_and_build("flux3", window._image_edit_snapshot("flux3")) == {
+        "prompt": "Make it blue", "images": ["https://cdn.test/source.png"],
+        "aspect_ratio": "1:2", "resolution": "1.5k", "output_format": "webp",
+        "seed": 42, "enable_sync_mode": False, "enable_base64_output": False,
+    }
+    qwen2511 = window._image_edit_controls["qwen2511"]
+    qwen2511["size"].setText("1024*768")
+    assert window._image_edit_upload_and_build("qwen2511", window._image_edit_snapshot("qwen2511")) == {
+        "prompt": "Make it red", "images": ["https://cdn.test/source.png"],
+        "size": "1024*768", "output_format": "webp", "seed": 42,
+        "enable_sync_mode": False, "enable_base64_output": False,
+    }
+
+
+def test_flux3_multi_mode_creates_one_job_per_ref1_with_fixed_identity(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    window = MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "sogni-key.txt"),
+        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"),
+    )
+    controls = window._image_edit_controls["flux3"]
+    controls["multi_toggle"].setChecked(True)
+    assert controls["single_inputs"].isHidden()
+    for name in ("a.png", "b.png", "face.png", "body.png"):
+        (tmp_path / name).write_bytes(b"png")
+    for name in ("a.png", "b.png"):
+        item = QListWidgetItem(name)
+        item.setData(Qt.UserRole, str(tmp_path / name))
+        controls["multi_sources"].addItem(item)
+    controls["multi_face"].setText(str(tmp_path / "face.png"))
+    controls["multi_body"].setText(str(tmp_path / "body.png"))
+    controls["prompt"].setPlainText("Keep this identity")
+    controls["resolution"].setCurrentText("1.5k")
+    jobs = window._flux3_multi_snapshot()
+    assert [job["images"] for job in jobs] == [
+        [str(tmp_path / "a.png"), str(tmp_path / "face.png"), str(tmp_path / "body.png")],
+        [str(tmp_path / "b.png"), str(tmp_path / "face.png"), str(tmp_path / "body.png")],
+    ]
+    assert all(job["resolution"] == "1.5k" for job in jobs)
+
+
+def test_flux3_multi_button_submits_each_ref1_and_updates_rows(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    window = MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "sogni-key.txt"),
+        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"),
+    )
+    controls = window._image_edit_controls["flux3"]
+    for name in ("a.png", "b.png", "face.png", "body.png"):
+        (tmp_path / name).write_bytes(b"png")
+    for name in ("a.png", "b.png"):
+        item = QListWidgetItem(name)
+        item.setData(Qt.UserRole, str(tmp_path / name))
+        controls["multi_sources"].addItem(item)
+    controls["multi_face"].setText(str(tmp_path / "face.png"))
+    controls["multi_body"].setText(str(tmp_path / "body.png"))
+    controls["prompt"].setPlainText("Same prompt")
+    submitted = []
+
+    class Client:
+        def submit(self, payload, *, model_id):
+            submitted.append((payload, model_id))
+            return WaveSpeedPrediction(f"task-{len(submitted)}", "created")
+
+        def poll_result(self, task_id):
+            assert window.wavespeed_history.list()[0]["task_id"] == task_id
+            assert window.wavespeed_history.list()[0]["status"] == "running"
+            return WaveSpeedPrediction(task_id, "completed", outputs=["https://cdn/out.png"])
+
+    window.wavespeed = Client()
+    window.wavespeed_history = WaveSpeedHistoryStore(tmp_path / "history.json")
+    window._wavespeed_upload_cached = lambda path: {"download_url": f"https://cdn/{path.name}"}
+    window._wavespeed_save_output = lambda _output, _snapshot, task_id, _suffix: str(tmp_path / f"{task_id}.png")
+    captured = []
+    window._run_wavespeed_worker = lambda task, kind: captured.append((task, kind))
+
+    window._flux3_multi_generate()
+    assert controls["multi_table"].rowCount() == 2
+    assert not controls["multi_generate"].isEnabled()
+    assert captured[0][1] == "flux3_multi_done"
+    jobs = captured[0][0]()
+    _app().processEvents()
+    window._handle_wavespeed_event("flux3_multi_done", jobs)
+
+    assert [entry[0]["images"] for entry in submitted] == [
+        ["https://cdn/a.png", "https://cdn/face.png", "https://cdn/body.png"],
+        ["https://cdn/b.png", "https://cdn/face.png", "https://cdn/body.png"],
+    ]
+    assert controls["multi_table"].item(0, 1).text() == "completed"
+    assert controls["multi_table"].item(1, 2).text() == "task-2"
+    assert controls["multi_generate"].isEnabled()
+    assert len(window.wavespeed_history.list()) == 2
 
 
 def test_flux_reference_images_can_be_reordered(tmp_path: Path):
@@ -646,6 +762,141 @@ def test_wavespeed_queue_panel_adds_rows_and_exposes_retry(tmp_path: Path):
     assert window.wavespeed_queue_total_label.text() == "Total cola: no estimado"
 
 
+def test_wavespeed_queue_locks_shared_frame_while_jobs_exist():
+    _app()
+    widget = WaveSpeedQueueWidget()
+    assert widget.legacy_frame_panel.isHidden()
+    assert widget.add_video_button.isHidden()
+    widget.load_queue(WaveSpeedQueue(frame_path="frame-a.png", items=[
+        WaveSpeedQueueItem(video_path="video.mp4", prompt="Scene"),
+    ]))
+
+    assert not widget.legacy_frame_panel.isHidden()
+    assert widget.frame_edit.isReadOnly()
+    assert not widget.choose_frame_button.isEnabled()
+
+    widget.load_queue(WaveSpeedQueue())
+    assert not widget.frame_edit.isReadOnly()
+    assert widget.choose_frame_button.isEnabled()
+
+
+def test_wavespeed_queue_restores_task_and_reference_details():
+    _app()
+    widget = WaveSpeedQueueWidget()
+    item = WaveSpeedQueueItem(
+        prompt="Scene", reference_images=["C:/photos/person.png"],
+        reference_videos=["C:/videos/motion.mp4"], price=1.25,
+        task_id="prediction-1", status=QueueStatus.COMPLETED,
+        output_file="C:/outputs/result.mp4",
+    )
+    widget.load_queue(WaveSpeedQueue(items=[item]))
+
+    assert "person.png" in widget.table.item(0, 1).text()
+    assert "motion.mp4" in widget.table.item(0, 1).text()
+    assert widget.table.item(0, 9).text() == "$1.2500"
+    assert widget.table.item(0, 11).text() == "prediction-1"
+    assert widget.table.item(0, 12).text() == "C:/outputs/result.mp4"
+
+
+def test_running_wavespeed_queue_uses_frozen_jobs_and_disables_edits(tmp_path: Path, monkeypatch):
+    _app()
+    frame = tmp_path / "frame.png"
+    video = tmp_path / "video.mp4"
+    frame.write_bytes(b"image")
+    video.write_bytes(b"video")
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    window = MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "key.txt"),
+        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"),
+    )
+    widget = window.wavespeed_queue_widget
+    widget.load_queue(WaveSpeedQueue(frame_path=str(frame), items=[
+        WaveSpeedQueueItem(video_path=str(video), prompt="Original scene"),
+    ]))
+    monkeypatch.setattr("app.ui.main_window.threading.Thread.start", lambda self: None)
+
+    window._start_wavespeed_queue()
+    widget.queue().items[0].prompt = "Changed after start"
+
+    assert window._wavespeed_queue_active.items[0].prompt == "Original scene"
+    assert widget.table.editTriggers() == QAbstractItemView.NoEditTriggers
+    assert window.wavespeed_queue_add_button.isEnabled()
+    next_frame = tmp_path / "next-frame.png"
+    next_video = tmp_path / "next-video.mp4"
+    next_frame.write_bytes(b"next image")
+    next_video.write_bytes(b"next video")
+    for kind, path in (("reference_images", next_frame), ("reference_videos", next_video)):
+        reference = QListWidgetItem(path.name)
+        reference.setData(Qt.UserRole, str(path))
+        window.wavespeed_reference_lists[kind].addItem(reference)
+    window.wavespeed_prompt_edit.setPlainText("Next scene")
+    window._wavespeed_add_current_to_queue()
+    assert len(window._wavespeed_queue_active.items) == 2
+    assert window._wavespeed_queue_active.items[1].reference_images == [str(next_frame)]
+    assert window._wavespeed_queue_active.items[1].reference_videos == [str(next_video)]
+    assert window._wavespeed_queue_active.items[1].prompt == "Next scene"
+    widget.queue().items[0].status = QueueStatus.FAILED
+    widget.set_item_update(widget.queue().items[0])
+    assert not widget.table.cellWidget(0, 14).isEnabled()
+    window._wavespeed_queue_active.items[0].status = QueueStatus.COMPLETED
+    started = []
+    monkeypatch.setattr(window, "_start_wavespeed_queue", lambda: started.append(True))
+    window._handle_wavespeed_event("queue_finished", None)
+    assert started == [True]
+    assert widget.queue().items[0].status == QueueStatus.COMPLETED
+
+
+def test_wavespeed_price_does_not_show_a_previous_references_estimate(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    window = MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "key.txt"),
+        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"),
+    )
+    old_signature = window._wavespeed_price_signature()
+    window.wavespeed_price_label.setText("Precio estimado: $1 USD")
+    video = QListWidgetItem("new-video.mp4")
+    video.setData(Qt.UserRole, "C:/videos/new-video.mp4")
+    window.wavespeed_reference_lists["reference_videos"].addItem(video)
+
+    assert window.wavespeed_price_label.text() == "Precio: no estimado"
+    window._handle_wavespeed_event("price", {"signature": old_signature, "value": {"price": 1.0}})
+    assert window.wavespeed_price_label.text() == "Precio: no estimado"
+
+
+def test_wavespeed_reuploads_file_replaced_at_the_same_path(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    window = MainWindow(
+        CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "key.txt"),
+        wavespeed_key_store=ApiKeyStore(tmp_path / "wavespeed-key.txt"),
+        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"),
+    )
+    uploads = []
+
+    def upload(path):
+        uploads.append(path.read_bytes())
+        return {"download_url": f"https://cdn/{len(uploads)}"}
+
+    window.wavespeed.upload_file = upload
+    reference = tmp_path / "reference.mp4"
+    reference.write_bytes(b"first")
+    first = window._wavespeed_upload_cached(reference)["download_url"]
+    reference.write_bytes(b"second version")
+    second = window._wavespeed_upload_cached(reference)["download_url"]
+
+    assert (first, second) == ("https://cdn/1", "https://cdn/2")
+    assert uploads == [b"first", b"second version"]
+
+
 def test_wavespeed_image_panel_exposes_add_to_queue_action(tmp_path: Path):
     _app()
     db = Database(tmp_path / "app.db")
@@ -789,7 +1040,7 @@ def test_sogni_queue_delete_removes_only_confirmed_pending_job(tmp_path: Path, m
     assert window.sogni_queue_table.rowCount() == 1
 
 
-def test_add_to_queue_groups_jobs_by_frame_name(tmp_path: Path):
+def test_add_to_wan_queue_captures_each_jobs_own_prompt_and_references(tmp_path: Path):
     _app()
     db = Database(tmp_path / "app.db")
     db.initialize()
@@ -804,6 +1055,7 @@ def test_add_to_queue_groups_jobs_by_frame_name(tmp_path: Path):
         wavespeed_queue_store=queue_store,
     )
     window.wavespeed_queue_widget.load_queue(WaveSpeedQueue())
+    window.wavespeed_prompt_edit.setPlainText("First movement")
 
     def add_reference(kind: str, path: str):
         item = QListWidgetItem(Path(path).name)
@@ -813,25 +1065,22 @@ def test_add_to_queue_groups_jobs_by_frame_name(tmp_path: Path):
     add_reference("reference_images", "C:/frames/frame-a.png")
     add_reference("reference_videos", "C:/videos/video-1.mp4")
     window._wavespeed_add_current_to_queue()
+    window.wavespeed_reference_lists["reference_images"].clear()
+    window.wavespeed_reference_lists["reference_videos"].clear()
+    add_reference("reference_images", "C:/frames/frame-b.png")
     add_reference("reference_videos", "C:/videos/video-2.mp4")
+    add_reference("reference_audios", "C:/audio/voice-2.mp3")
+    window.wavespeed_prompt_edit.setPlainText("Second movement")
     window._wavespeed_add_current_to_queue()
 
-    queue = window.wavespeed_queue_widget.queue()
-    assert len(queue.items) == 2
-    assert all(Path(item.video_path).name.startswith("video-") for item in queue.items)
-    assert all(Path(item.video_path).name for item in queue.items)
-    assert Path(queue.frame_path).name == "frame-a.png"
+    first, second = window.wavespeed_queue_widget.queue().items
+    assert (first.prompt, first.reference_images, first.reference_videos, first.reference_audios) == (
+        "First movement", ["C:/frames/frame-a.png"], ["C:/videos/video-1.mp4"], [])
+    assert (second.prompt, second.reference_images, second.reference_videos, second.reference_audios) == (
+        "Second movement", ["C:/frames/frame-b.png"], ["C:/videos/video-2.mp4"], ["C:/audio/voice-2.mp3"])
     campaigns, _active_id = campaign_store.load()
     assert len(campaigns[0].queue.items) == 2
-    assert Path(campaigns[0].queue.frame_path).name == "frame-a.png"
-
-    window.wavespeed_reference_lists["reference_images"].clear()
-    add_reference("reference_images", "C:/frames/frame-b.png")
-    add_reference("reference_videos", "C:/videos/video-3.mp4")
-    window._wavespeed_add_current_to_queue()
-
-    assert len(window.wavespeed_queue_widget.queue().items) == 2
-    assert "distinto" in window.wavespeed_status_label.text()
+    assert campaigns[0].queue.items[1].reference_images == ["C:/frames/frame-b.png"]
 
 
 def test_wavespeed_campaign_controls_are_visible(tmp_path: Path):

@@ -35,7 +35,7 @@ class WaveSpeedQueueWidget(QWidget):
 
     COLUMNS = (
         "#",
-        "Video",
+        "Referencias",
         "Prompt",
         "Resolution",
         "Aspect",
@@ -55,6 +55,7 @@ class WaveSpeedQueueWidget(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._queue = WaveSpeedQueue()
+        self._running = False
         self._retry_buttons: dict[str, QPushButton] = {}
         self._build_ui()
 
@@ -84,20 +85,24 @@ class WaveSpeedQueueWidget(QWidget):
         campaign_row.addWidget(self.campaign_save_button)
         campaign_row.addWidget(self.campaign_delete_button)
         layout.addLayout(campaign_row)
-        layout.addWidget(QLabel("Cola secuencial WaveSpeed · un frame compartido, un video por fila"))
+        layout.addWidget(QLabel("Cola WaveSpeed · cada fila conserva su prompt y referencias"))
 
         frame_row = QHBoxLayout()
         self.frame_edit = QLineEdit()
-        self.frame_edit.setPlaceholderText("Frame compartido para toda la cola")
+        self.frame_edit.setPlaceholderText("Frame compartido de campañas antiguas")
         choose_frame = QPushButton("Seleccionar frame")
         choose_frame.clicked.connect(self._choose_frame)
         remove_frame = QPushButton("Quitar frame")
         remove_frame.clicked.connect(lambda: self.frame_edit.clear())
-        frame_row.addWidget(QLabel("Frame"))
+        self.choose_frame_button = choose_frame
+        self.remove_frame_button = remove_frame
+        frame_row.addWidget(QLabel("Frame anterior"))
         frame_row.addWidget(self.frame_edit, 1)
         frame_row.addWidget(choose_frame)
         frame_row.addWidget(remove_frame)
-        layout.addLayout(frame_row)
+        self.legacy_frame_panel = QWidget()
+        self.legacy_frame_panel.setLayout(frame_row)
+        layout.addWidget(self.legacy_frame_panel)
 
         self.output_edit = QLineEdit()
         self.output_edit.setPlaceholderText("Carpeta de salida; usa la carpeta por defecto si queda vacía")
@@ -122,8 +127,11 @@ class WaveSpeedQueueWidget(QWidget):
         controls = QHBoxLayout()
         add_video = QPushButton("Agregar video")
         add_video.clicked.connect(self._choose_videos)
+        add_video.setVisible(False)
         remove_selected = QPushButton("Quitar seleccionado")
         remove_selected.clicked.connect(self._remove_selected)
+        self.add_video_button = add_video
+        self.remove_selected_button = remove_selected
         start = QPushButton("Iniciar cola")
         start.clicked.connect(self.start_requested.emit)
         pause = QPushButton("Pausar después del actual")
@@ -135,6 +143,8 @@ class WaveSpeedQueueWidget(QWidget):
         estimate = QPushButton("Estimar costos")
         estimate.clicked.connect(self.estimate_requested.emit)
         self.estimate_button = estimate
+        self.retry_failed_button = retry_failed
+        self.clear_completed_button = clear_completed
         self.total_price_label = QLabel("Total estimado: no calculado")
         self.start_button = start
         self.pause_button = pause
@@ -150,8 +160,11 @@ class WaveSpeedQueueWidget(QWidget):
 
         self.status_label = QLabel("Cola vacía.")
         layout.addWidget(self.status_label)
+        self._update_status()
 
     def _choose_frame(self) -> None:
+        if self._queue.items:
+            return
         selected, _ = QFileDialog.getOpenFileName(
             self,
             "Seleccionar frame compartido",
@@ -174,11 +187,14 @@ class WaveSpeedQueueWidget(QWidget):
 
     def add_item_for_test(self, video_path: str) -> WaveSpeedQueueItem:
         item = WaveSpeedQueueItem(video_path=video_path)
+        self.append_item(item)
+        return item
+
+    def append_item(self, item: WaveSpeedQueueItem) -> None:
         self._queue.items.append(item)
         self._append_row(item)
         self._update_status()
         self.queue_changed.emit()
-        return item
 
     def add_video(self, video_path: str) -> WaveSpeedQueueItem:
         return self.add_item_for_test(video_path)
@@ -186,6 +202,7 @@ class WaveSpeedQueueWidget(QWidget):
     def set_frame_path(self, frame_path: str) -> None:
         self._queue.frame_path = frame_path
         self.frame_edit.setText(frame_path)
+        self._update_status()
         self.queue_changed.emit()
 
     def _text_item(self, value: object, *, editable: bool = False) -> QTableWidgetItem:
@@ -203,9 +220,14 @@ class WaveSpeedQueueWidget(QWidget):
     def _append_row(self, item: WaveSpeedQueueItem) -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
+        references = [*(f"I: {Path(name).name}" for name in item.reference_images),
+                      *(f"V: {Path(name).name}" for name in item.reference_videos),
+                      *(f"A: {Path(name).name}" for name in item.reference_audios)]
+        if not references and item.video_path:
+            references = [f"V: {Path(item.video_path).name}"]
         cells = {
             0: self._text_item(row + 1),
-            1: self._text_item(Path(item.video_path).name),
+            1: self._text_item(", ".join(references)),
             2: self._text_item(item.prompt, editable=True),
             3: self._text_item(item.resolution, editable=True),
             4: self._text_item(item.aspect_ratio, editable=True),
@@ -213,14 +235,16 @@ class WaveSpeedQueueWidget(QWidget):
             6: self._check_item(item.enable_audio),
             7: self._check_item(item.enable_prompt_expansion),
             8: self._text_item(item.seed, editable=True),
-            9: self._text_item("-"),
+            9: self._text_item("-" if item.price is None else f"${item.price:.4f}"),
             10: self._text_item(item.status),
-            11: self._text_item(""),
-            12: self._text_item(""),
-            13: self._text_item(""),
+            11: self._text_item(item.task_id),
+            12: self._text_item(item.output_file),
+            13: self._text_item(item.error),
             15: self._text_item("Seedance 2.0" if "seedance" in item.model_id else "WAN 3.0"),
         }
         cells[1].setData(Qt.UserRole, item.video_path)
+        cells[1].setToolTip("\n".join([*item.reference_images,
+                                        *item.reference_videos, *item.reference_audios]))
         cells[10].setData(Qt.UserRole, item.item_id)
         self.table.blockSignals(True)
         for column, cell in cells.items():
@@ -276,6 +300,16 @@ class WaveSpeedQueueWidget(QWidget):
             self.table.item(row, 0).setText(str(row + 1))
 
     def _update_status(self) -> None:
+        legacy = bool(self._queue.frame_path) and (
+            not self._queue.items or any(item.video_path and not (
+                item.reference_images or item.reference_videos or item.reference_audios
+            ) for item in self._queue.items)
+        )
+        self.legacy_frame_panel.setVisible(legacy)
+        frame_locked = bool(self._queue.items)
+        self.frame_edit.setReadOnly(frame_locked)
+        self.choose_frame_button.setEnabled(not frame_locked)
+        self.remove_frame_button.setEnabled(not frame_locked)
         self.status_label.setText(f"{len(self._queue.items)} ítem(s) en cola.")
 
     def load_queue(self, queue: WaveSpeedQueue) -> None:
@@ -301,8 +335,24 @@ class WaveSpeedQueueWidget(QWidget):
         return self._queue
 
     def set_running(self, running: bool) -> None:
+        self._running = running
         self.start_button.setEnabled(not running)
         self.pause_button.setEnabled(running)
+        self.table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers if running else
+            QAbstractItemView.DoubleClicked | QAbstractItemView.SelectedClicked | QAbstractItemView.EditKeyPressed
+        )
+        for control in (self.add_video_button, self.remove_selected_button,
+                        self.retry_failed_button, self.clear_completed_button,
+                        self.campaign_combo, self.campaign_name_edit,
+                        self.campaign_new_button, self.campaign_save_button,
+                        self.campaign_delete_button, self.execution_mode_combo,
+                        self.output_edit, self.estimate_button):
+            control.setEnabled(not running)
+        for item in self._queue.items:
+            button = self._retry_buttons.get(item.item_id)
+            if button is not None:
+                button.setEnabled(not running and item.status == QueueStatus.FAILED)
 
     def set_item_update(self, updated: WaveSpeedQueueItem) -> None:
         existing = next((item for item in self._queue.items if item.item_id == updated.item_id), None)
@@ -318,7 +368,9 @@ class WaveSpeedQueueWidget(QWidget):
             self.table.item(row, 12).setText(updated.output_file)
             self.table.item(row, 13).setText(updated.error)
             self.table.blockSignals(False)
-            self._retry_buttons[updated.item_id].setEnabled(updated.status == QueueStatus.FAILED)
+            self._retry_buttons[updated.item_id].setEnabled(
+                not self._running and updated.status == QueueStatus.FAILED
+            )
             break
 
     def has_retry_control(self, item_id: str) -> bool:

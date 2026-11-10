@@ -37,12 +37,16 @@ def _redact_remote_urls(value: Any) -> Any:
 class WaveSpeedQueueItem:
     item_id: str = field(default_factory=lambda: uuid4().hex)
     video_path: str = ""
+    reference_images: list[str] = field(default_factory=list)
+    reference_videos: list[str] = field(default_factory=list)
+    reference_audios: list[str] = field(default_factory=list)
     prompt: str = ""
     resolution: str = "720p"
     aspect_ratio: str = "16:9"
     duration: int = 5
     enable_prompt_expansion: bool = False
     enable_audio: bool = True
+    safety_checker: bool = True
     seed: int = -1
     model_id: str = "alibaba/wan-3.0/reference-to-video"
     status: str = QueueStatus.PENDING
@@ -67,12 +71,16 @@ class WaveSpeedQueueItem:
         fields = {
             "item_id",
             "video_path",
+            "reference_images",
+            "reference_videos",
+            "reference_audios",
             "prompt",
             "resolution",
             "aspect_ratio",
             "duration",
             "enable_prompt_expansion",
             "enable_audio",
+            "safety_checker",
             "seed",
             "model_id",
             "status",
@@ -108,6 +116,9 @@ class WaveSpeedQueue:
     def from_dict(cls, value: dict[str, Any]) -> "WaveSpeedQueue":
         raw_items = value.get("items") or []
         items = [WaveSpeedQueueItem.from_dict(item) for item in raw_items if isinstance(item, dict)]
+        for item in items:
+            if item.status in {QueueStatus.RUNNING, QueueStatus.PAUSED}:
+                item.status = QueueStatus.PENDING
         return cls(
             frame_path=str(value.get("frame_path") or ""),
             output_dir=str(value.get("output_dir") or ""),

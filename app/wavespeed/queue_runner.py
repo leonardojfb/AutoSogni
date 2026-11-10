@@ -41,21 +41,51 @@ class WaveSpeedQueueRunner:
             return None
 
     @staticmethod
-    def _payload(item: WaveSpeedQueueItem, frame_url: str, video_url: str) -> dict[str, Any]:
+    def _payload(item: WaveSpeedQueueItem, references: dict[str, list[str]]) -> dict[str, Any]:
         if item.model_id == SEEDANCE_MODEL_ID:
             return build_seedance_payload(
-                prompt=item.prompt, reference_images=[frame_url], reference_videos=[video_url],
+                prompt=item.prompt, **references,
                 resolution=item.resolution, aspect_ratio=item.aspect_ratio, duration=item.duration,
                 enable_web_search=item.enable_prompt_expansion, generate_audio=item.enable_audio,
+                safety_checker=item.safety_checker,
             )
         if item.model_id != MODEL_ID:
             raise ValueError(f"Unsupported queue model: {item.model_id}")
         return build_reference_video_payload(
-            prompt=item.prompt, reference_images=[frame_url], reference_videos=[video_url],
+            prompt=item.prompt, **references,
             resolution=item.resolution, aspect_ratio=item.aspect_ratio, duration=item.duration,
             enable_prompt_expansion=item.enable_prompt_expansion, enable_audio=item.enable_audio,
             seed=item.seed, enable_sync_mode=False, enable_base64_output=False,
         )
+
+    @staticmethod
+    def _references(item: WaveSpeedQueueItem, queue: WaveSpeedQueue) -> dict[str, list[str]]:
+        if not item.video_path or item.reference_images or item.reference_videos or item.reference_audios:
+            return {"reference_images": list(item.reference_images),
+                    "reference_videos": list(item.reference_videos),
+                    "reference_audios": list(item.reference_audios)}
+        return {"reference_images": [queue.frame_path] if queue.frame_path else [],
+                "reference_videos": [item.video_path] if item.video_path else [],
+                "reference_audios": []}
+
+    def _prepare_payload(self, item: WaveSpeedQueueItem, queue: WaveSpeedQueue,
+                         uploaded: dict[tuple[str, int, int], str]) -> dict[str, Any]:
+        references = self._references(item, queue)
+        self._payload(item, references)
+        remote: dict[str, list[str]] = {}
+        for kind, paths in references.items():
+            remote[kind] = []
+            for name in paths:
+                path = Path(name)
+                try:
+                    stat = path.stat()
+                    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+                except OSError:
+                    key = (str(path.resolve()), -1, -1)
+                if key not in uploaded:
+                    uploaded[key] = self.upload_file(path)["download_url"]
+                remote[kind].append(uploaded[key])
+        return self._payload(item, remote)
 
     def _estimate(self, payload: dict[str, Any], model_id: str) -> dict[str, Any]:
         if model_id == MODEL_ID:
@@ -70,8 +100,7 @@ class WaveSpeedQueueRunner:
     def run(self, queue: WaveSpeedQueue, cancel_event=None, *, parallel: bool = False) -> WaveSpeedQueue:
         if parallel:
             return self._run_parallel(queue, cancel_event)
-        frame_url: str | None = None
-        uploaded_videos: dict[str, str] = {}
+        uploaded: dict[tuple[str, int, int], str] = {}
 
         for item in queue.items:
             if queue.paused or (cancel_event is not None and cancel_event.is_set()):
@@ -84,21 +113,6 @@ class WaveSpeedQueueRunner:
                 item.error = ""
                 self._notify(item)
 
-                if frame_url is None:
-                    frame_url = self.upload_file(Path(queue.frame_path))["download_url"]
-                video_key = str(Path(item.video_path).resolve())
-                video_url = uploaded_videos.get(video_key)
-                if video_url is None:
-                    video_url = self.upload_file(Path(item.video_path))["download_url"]
-                    uploaded_videos[video_key] = video_url
-
-                payload = self._payload(item, frame_url, video_url)
-                try:
-                    item.price = self._price(self._estimate(payload, item.model_id))
-                    self._notify(item)
-                except Exception:
-                    item.price = None
-
                 if item.task_id:
                     try:
                         prediction = self.client.get_result(item.task_id)
@@ -108,6 +122,12 @@ class WaveSpeedQueueRunner:
                         self._notify(item)
                         continue
                 else:
+                    payload = self._prepare_payload(item, queue, uploaded)
+                    try:
+                        item.price = self._price(self._estimate(payload, item.model_id))
+                        self._notify(item)
+                    except Exception:
+                        item.price = None
                     prediction = self._submit(payload, item.model_id)
                     item.task_id = prediction.id
                     self._notify(item)
@@ -143,8 +163,7 @@ class WaveSpeedQueueRunner:
     def _run_parallel(self, queue: WaveSpeedQueue, cancel_event=None) -> WaveSpeedQueue:
         if queue.paused or (cancel_event is not None and cancel_event.is_set()):
             return queue
-        frame_url: str | None = None
-        uploaded_videos: dict[str, str] = {}
+        uploaded: dict[tuple[str, int, int], str] = {}
         prepared: list[tuple[WaveSpeedQueueItem, dict[str, Any]]] = []
 
         for item in queue.items:
@@ -154,18 +173,12 @@ class WaveSpeedQueueRunner:
                 item.status = QueueStatus.RUNNING
                 item.error = ""
                 self._notify(item)
-                if frame_url is None:
-                    frame_url = self.upload_file(Path(queue.frame_path))["download_url"]
-                video_key = str(Path(item.video_path).resolve())
-                video_url = uploaded_videos.get(video_key)
-                if video_url is None:
-                    video_url = self.upload_file(Path(item.video_path))["download_url"]
-                    uploaded_videos[video_key] = video_url
-                payload = self._payload(item, frame_url, video_url)
-                try:
-                    item.price = self._price(self._estimate(payload, item.model_id))
-                except Exception:
-                    item.price = None
+                payload = self._prepare_payload(item, queue, uploaded) if not item.task_id else {}
+                if not item.task_id:
+                    try:
+                        item.price = self._price(self._estimate(payload, item.model_id))
+                    except Exception:
+                        item.price = None
                 self._notify(item)
                 prepared.append((item, payload))
             except Exception as exc:
@@ -229,19 +242,11 @@ class WaveSpeedQueueRunner:
         return queue
 
     def estimate_prices(self, queue: WaveSpeedQueue) -> float:
-        frame_url: str | None = None
-        uploaded_videos: dict[str, str] = {}
+        uploaded: dict[tuple[str, int, int], str] = {}
         total = 0.0
         for item in queue.items:
             try:
-                if frame_url is None:
-                    frame_url = self.upload_file(Path(queue.frame_path))["download_url"]
-                video_key = str(Path(item.video_path).resolve())
-                video_url = uploaded_videos.get(video_key)
-                if video_url is None:
-                    video_url = self.upload_file(Path(item.video_path))["download_url"]
-                    uploaded_videos[video_key] = video_url
-                payload = self._payload(item, frame_url, video_url)
+                payload = self._prepare_payload(item, queue, uploaded)
                 item.price = self._price(self._estimate(payload, item.model_id))
                 item.error = ""
                 if item.price is not None:
