@@ -825,6 +825,8 @@ def test_running_wavespeed_queue_uses_frozen_jobs_and_disables_edits(tmp_path: P
     monkeypatch.setattr("app.ui.main_window.threading.Thread.start", lambda self: None)
 
     window._start_wavespeed_queue()
+    active_id = window._wavespeed_queue_active.items[0].item_id
+    widget.set_active_run({active_id}, running=True)
     widget.queue().items[0].prompt = "Changed after start"
 
     assert window._wavespeed_queue_active.items[0].prompt == "Original scene"
@@ -845,14 +847,24 @@ def test_running_wavespeed_queue_uses_frozen_jobs_and_disables_edits(tmp_path: P
     assert widget.queue().items[1].reference_images == [str(next_frame)]
     assert widget.queue().items[1].reference_videos == [str(next_video)]
     assert widget.queue().items[1].prompt == "Next scene"
+    assert "Ejecución actual" in widget.active_run_label.text()
+    assert "Original scene" in widget.active_run_label.text()
+    assert "Next scene" not in widget.active_run_label.text()
+    assert "Próxima ejecución" in widget.next_run_label.text()
+    assert "Next scene" in widget.next_run_label.text()
+    assert widget.table.item(0, widget.RUN_GROUP_COLUMN).text() == "Actual"
+    assert widget.table.item(1, widget.RUN_GROUP_COLUMN).text() == "Próxima"
     widget.queue().items[0].status = QueueStatus.FAILED
     widget.set_item_update(widget.queue().items[0])
-    assert not widget.table.cellWidget(0, 14).isEnabled()
+    assert not widget.table.cellWidget(0, widget.RETRY_COLUMN).isEnabled()
     window._wavespeed_queue_active.items[0].status = QueueStatus.COMPLETED
+    widget.set_active_run({active_id}, running=False)
     started = []
     monkeypatch.setattr(window, "_start_wavespeed_queue", lambda: started.append(True))
     window._handle_wavespeed_event("queue_finished", None)
     assert started == []
+    assert "finalizada" in widget.active_run_label.text().lower()
+    assert "Next scene" in widget.next_run_label.text()
     assert widget.queue().items[0].status == QueueStatus.COMPLETED
     campaigns, _active_id = window.wavespeed_campaign_store.load()
     assert campaigns[0].queue.items[0].status == QueueStatus.COMPLETED

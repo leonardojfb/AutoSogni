@@ -33,29 +33,36 @@ class WaveSpeedQueueWidget(QWidget):
     save_campaign_requested = Signal()
     delete_campaign_requested = Signal()
 
+    RUN_GROUP_COLUMN = 0
+    INDEX_COLUMN = 1
+    REFERENCES_COLUMN = 2
+    PROMPT_COLUMN = 3
+    RESOLUTION_COLUMN = 4
+    ASPECT_COLUMN = 5
+    DURATION_COLUMN = 6
+    AUDIO_COLUMN = 7
+    EXPANSION_COLUMN = 8
+    SEED_COLUMN = 9
+    PRICE_COLUMN = 10
+    STATUS_COLUMN = 11
+    TASK_COLUMN = 12
+    OUTPUT_COLUMN = 13
+    ERROR_COLUMN = 14
+    RETRY_COLUMN = 15
+    MODEL_COLUMN = 16
+
     COLUMNS = (
-        "#",
-        "Referencias",
-        "Prompt",
-        "Resolution",
-        "Aspect",
-        "Duration",
-        "Audio",
-        "Expand / Web",
-        "Seed",
-        "Price",
-        "Status",
-        "Task",
-        "Output",
-        "Error",
-        "Retry",
-        "Model",
+        "Tanda", "#", "Referencias", "Prompt", "Resolution", "Aspect", "Duration",
+        "Audio", "Expand / Web", "Seed", "Price", "Status", "Task", "Output",
+        "Error", "Retry", "Model",
     )
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._queue = WaveSpeedQueue()
         self._running = False
+        self._active_run_ids: set[str] = set()
+        self._active_run_running = False
         self._retry_buttons: dict[str, QPushButton] = {}
         self._build_ui()
 
@@ -113,6 +120,13 @@ class WaveSpeedQueueWidget(QWidget):
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(choose_output)
         layout.addLayout(output_row)
+
+        self.active_run_label = QLabel("Ejecución actual: ninguna.")
+        self.active_run_label.setWordWrap(True)
+        self.next_run_label = QLabel("Próxima ejecución: sin jobs pendientes.")
+        self.next_run_label.setWordWrap(True)
+        layout.addWidget(self.active_run_label)
+        layout.addWidget(self.next_run_label)
 
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
@@ -194,6 +208,7 @@ class WaveSpeedQueueWidget(QWidget):
         self._queue.items.append(item)
         self._append_row(item)
         self._update_status()
+        self._refresh_run_groups()
         self.queue_changed.emit()
 
     def add_video(self, video_path: str) -> WaveSpeedQueueItem:
@@ -226,26 +241,27 @@ class WaveSpeedQueueWidget(QWidget):
         if not references and item.video_path:
             references = [f"V: {Path(item.video_path).name}"]
         cells = {
-            0: self._text_item(row + 1),
-            1: self._text_item(", ".join(references)),
-            2: self._text_item(item.prompt, editable=True),
-            3: self._text_item(item.resolution, editable=True),
-            4: self._text_item(item.aspect_ratio, editable=True),
-            5: self._text_item(item.duration, editable=True),
-            6: self._check_item(item.enable_audio),
-            7: self._check_item(item.enable_prompt_expansion),
-            8: self._text_item(item.seed, editable=True),
-            9: self._text_item("-" if item.price is None else f"${item.price:.4f}"),
-            10: self._text_item(item.status),
-            11: self._text_item(item.task_id),
-            12: self._text_item(item.output_file),
-            13: self._text_item(item.error),
-            15: self._text_item("Seedance 2.0" if "seedance" in item.model_id else "WAN 3.0"),
+            self.RUN_GROUP_COLUMN: self._text_item(self._run_group_for(item)),
+            self.INDEX_COLUMN: self._text_item(row + 1),
+            self.REFERENCES_COLUMN: self._text_item(", ".join(references)),
+            self.PROMPT_COLUMN: self._text_item(item.prompt, editable=True),
+            self.RESOLUTION_COLUMN: self._text_item(item.resolution, editable=True),
+            self.ASPECT_COLUMN: self._text_item(item.aspect_ratio, editable=True),
+            self.DURATION_COLUMN: self._text_item(item.duration, editable=True),
+            self.AUDIO_COLUMN: self._check_item(item.enable_audio),
+            self.EXPANSION_COLUMN: self._check_item(item.enable_prompt_expansion),
+            self.SEED_COLUMN: self._text_item(item.seed, editable=True),
+            self.PRICE_COLUMN: self._text_item("-" if item.price is None else f"${item.price:.4f}"),
+            self.STATUS_COLUMN: self._text_item(item.status),
+            self.TASK_COLUMN: self._text_item(item.task_id),
+            self.OUTPUT_COLUMN: self._text_item(item.output_file),
+            self.ERROR_COLUMN: self._text_item(item.error),
+            self.MODEL_COLUMN: self._text_item(self._model_name(item)),
         }
-        cells[1].setData(Qt.UserRole, item.video_path)
-        cells[1].setToolTip("\n".join([*item.reference_images,
-                                        *item.reference_videos, *item.reference_audios]))
-        cells[10].setData(Qt.UserRole, item.item_id)
+        cells[self.REFERENCES_COLUMN].setData(Qt.UserRole, item.video_path)
+        cells[self.REFERENCES_COLUMN].setToolTip("\n".join([*item.reference_images,
+                                                               *item.reference_videos, *item.reference_audios]))
+        cells[self.STATUS_COLUMN].setData(Qt.UserRole, item.item_id)
         self.table.blockSignals(True)
         for column, cell in cells.items():
             self.table.setItem(row, column, cell)
@@ -253,32 +269,34 @@ class WaveSpeedQueueWidget(QWidget):
         retry = QPushButton("Reintentar")
         retry.setEnabled(item.status == QueueStatus.FAILED)
         retry.clicked.connect(lambda _checked=False, item_id=item.item_id: self.retry_requested.emit(item_id))
-        self.table.setCellWidget(row, 14, retry)
+        self.table.setCellWidget(row, self.RETRY_COLUMN, retry)
         self._retry_buttons[item.item_id] = retry
 
     def _item_changed(self, cell: QTableWidgetItem) -> None:
-        if cell.column() in {2, 3, 4, 5, 6, 7, 8}:
+        if cell.column() in {self.PROMPT_COLUMN, self.RESOLUTION_COLUMN, self.ASPECT_COLUMN,
+                             self.DURATION_COLUMN, self.AUDIO_COLUMN, self.EXPANSION_COLUMN,
+                             self.SEED_COLUMN}:
             self._sync_item(cell.row())
             self.queue_changed.emit()
 
     def _sync_item(self, row: int) -> WaveSpeedQueueItem | None:
         if not 0 <= row < self.table.rowCount():
             return None
-        item_id = self.table.item(row, 10).data(Qt.UserRole)
+        item_id = self.table.item(row, self.STATUS_COLUMN).data(Qt.UserRole)
         item = next((value for value in self._queue.items if value.item_id == item_id), None)
         if item is None:
             return None
-        item.prompt = self.table.item(row, 2).text()
-        item.resolution = self.table.item(row, 3).text()
-        item.aspect_ratio = self.table.item(row, 4).text()
+        item.prompt = self.table.item(row, self.PROMPT_COLUMN).text()
+        item.resolution = self.table.item(row, self.RESOLUTION_COLUMN).text()
+        item.aspect_ratio = self.table.item(row, self.ASPECT_COLUMN).text()
         try:
-            item.duration = int(self.table.item(row, 5).text())
+            item.duration = int(self.table.item(row, self.DURATION_COLUMN).text())
         except ValueError:
             pass
-        item.enable_audio = self.table.item(row, 6).checkState() == Qt.Checked
-        item.enable_prompt_expansion = self.table.item(row, 7).checkState() == Qt.Checked
+        item.enable_audio = self.table.item(row, self.AUDIO_COLUMN).checkState() == Qt.Checked
+        item.enable_prompt_expansion = self.table.item(row, self.EXPANSION_COLUMN).checkState() == Qt.Checked
         try:
-            item.seed = int(self.table.item(row, 8).text())
+            item.seed = int(self.table.item(row, self.SEED_COLUMN).text())
         except ValueError:
             pass
         return item
@@ -293,11 +311,12 @@ class WaveSpeedQueueWidget(QWidget):
             self.table.removeRow(row)
         self._renumber_rows()
         self._update_status()
+        self._refresh_run_groups()
         self.queue_changed.emit()
 
     def _renumber_rows(self) -> None:
         for row in range(self.table.rowCount()):
-            self.table.item(row, 0).setText(str(row + 1))
+            self.table.item(row, self.INDEX_COLUMN).setText(str(row + 1))
 
     def _update_status(self) -> None:
         legacy = bool(self._queue.frame_path) and (
@@ -314,6 +333,9 @@ class WaveSpeedQueueWidget(QWidget):
 
     def load_queue(self, queue: WaveSpeedQueue) -> None:
         self._queue = queue
+        if not self._running:
+            self._active_run_ids.clear()
+            self._active_run_running = False
         self.frame_edit.setText(queue.frame_path)
         self.output_edit.setText(queue.output_dir)
         self.execution_mode_combo.blockSignals(True)
@@ -325,6 +347,7 @@ class WaveSpeedQueueWidget(QWidget):
         for item in queue.items:
             self._append_row(item)
         self._update_status()
+        self._refresh_run_groups()
 
     def queue(self) -> WaveSpeedQueue:
         for row in range(self.table.rowCount()):
@@ -354,24 +377,73 @@ class WaveSpeedQueueWidget(QWidget):
             if button is not None:
                 button.setEnabled(not running and item.status == QueueStatus.FAILED)
 
+    def set_active_run(self, item_ids: set[str], running: bool) -> None:
+        self._active_run_ids = set(item_ids)
+        self._active_run_running = running
+        self._refresh_run_groups()
+
     def set_item_update(self, updated: WaveSpeedQueueItem) -> None:
         existing = next((item for item in self._queue.items if item.item_id == updated.item_id), None)
         if existing is not None:
             existing.__dict__.update(updated.__dict__)
         for row in range(self.table.rowCount()):
-            if self.table.item(row, 10).data(Qt.UserRole) != updated.item_id:
+            if self.table.item(row, self.STATUS_COLUMN).data(Qt.UserRole) != updated.item_id:
                 continue
             self.table.blockSignals(True)
-            self.table.item(row, 9).setText("-" if updated.price is None else f"${updated.price:.4f}")
-            self.table.item(row, 10).setText(updated.status)
-            self.table.item(row, 11).setText(updated.task_id)
-            self.table.item(row, 12).setText(updated.output_file)
-            self.table.item(row, 13).setText(updated.error)
+            self.table.item(row, self.PRICE_COLUMN).setText("-" if updated.price is None else f"${updated.price:.4f}")
+            self.table.item(row, self.STATUS_COLUMN).setText(updated.status)
+            self.table.item(row, self.TASK_COLUMN).setText(updated.task_id)
+            self.table.item(row, self.OUTPUT_COLUMN).setText(updated.output_file)
+            self.table.item(row, self.ERROR_COLUMN).setText(updated.error)
             self.table.blockSignals(False)
             self._retry_buttons[updated.item_id].setEnabled(
                 not self._running and updated.status == QueueStatus.FAILED
             )
             break
+        self._refresh_run_groups()
+
+    @staticmethod
+    def _model_name(item: WaveSpeedQueueItem) -> str:
+        return "Seedance 2.0" if "seedance" in item.model_id else "WAN 3.0"
+
+    def _run_group_for(self, item: WaveSpeedQueueItem) -> str:
+        if item.item_id in self._active_run_ids:
+            return "Actual"
+        if item.status in {QueueStatus.PENDING, QueueStatus.PAUSED}:
+            return "Próxima"
+        return "—"
+
+    @staticmethod
+    def _summary_line(position: int, item: WaveSpeedQueueItem) -> str:
+        prompt = " ".join(item.prompt.split()) or "(sin prompt)"
+        if len(prompt) > 80:
+            prompt = f"{prompt[:77]}..."
+        model = "Seedance 2.0" if "seedance" in item.model_id else "WAN 3.0"
+        return (f"#{position} · {model} · {prompt} · I:{len(item.reference_images)} "
+                f"V:{len(item.reference_videos)} A:{len(item.reference_audios)}")
+
+    def _refresh_run_groups(self) -> None:
+        positions = {item.item_id: index for index, item in enumerate(self._queue.items, start=1)}
+        active = [item for item in self._queue.items if item.item_id in self._active_run_ids]
+        upcoming = [item for item in self._queue.items
+                    if item.item_id not in self._active_run_ids
+                    and item.status in {QueueStatus.PENDING, QueueStatus.PAUSED}]
+        if active:
+            state = "bloqueada" if self._active_run_running else "finalizada"
+            lines = "\n".join(self._summary_line(positions[item.item_id], item) for item in active)
+            self.active_run_label.setText(f"Ejecución actual — {state} ({len(active)} job(s))\n{lines}")
+        else:
+            self.active_run_label.setText("Ejecución actual: ninguna.")
+        if upcoming:
+            lines = "\n".join(self._summary_line(positions[item.item_id], item) for item in upcoming)
+            self.next_run_label.setText(f"Próxima ejecución — {len(upcoming)} job(s) listo(s)\n{lines}")
+        else:
+            self.next_run_label.setText("Próxima ejecución: sin jobs pendientes.")
+        for row in range(self.table.rowCount()):
+            item_id = self.table.item(row, self.STATUS_COLUMN).data(Qt.UserRole)
+            item = next((value for value in self._queue.items if value.item_id == item_id), None)
+            if item is not None:
+                self.table.item(row, self.RUN_GROUP_COLUMN).setText(self._run_group_for(item))
 
     def has_retry_control(self, item_id: str) -> bool:
         return item_id in self._retry_buttons
