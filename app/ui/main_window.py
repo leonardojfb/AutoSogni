@@ -2200,6 +2200,9 @@ class MainWindow(QMainWindow):
         self._wavespeed_queue_cancel_event.clear()
         self._wavespeed_queue_running = True
         self.wavespeed_queue_widget.set_running(True)
+        self.wavespeed_queue_widget.set_active_run(
+            {item.item_id for item in queue.items}, running=True,
+        )
         self._persist_wavespeed_campaign_queue(self.wavespeed_queue_widget.queue())
         self.wavespeed_queue_widget.set_error("Cola iniciada.")
         thread = threading.Thread(target=self._run_wavespeed_queue, args=(queue,), daemon=True)
@@ -3029,6 +3032,10 @@ class MainWindow(QMainWindow):
             if finished_queue is not None:
                 for item in finished_queue.items:
                     self.wavespeed_queue_widget.set_item_update(item)
+            self.wavespeed_queue_widget.set_active_run(
+                {item.item_id for item in finished_queue.items} if finished_queue else set(),
+                running=False,
+            )
             self._persist_wavespeed_campaign_queue(self.wavespeed_queue_widget.queue())
             self._wavespeed_queue_running = False
             self._wavespeed_queue_active = None

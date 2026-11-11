@@ -826,7 +826,7 @@ def test_running_wavespeed_queue_uses_frozen_jobs_and_disables_edits(tmp_path: P
 
     window._start_wavespeed_queue()
     active_id = window._wavespeed_queue_active.items[0].item_id
-    widget.set_active_run({active_id}, running=True)
+    assert widget._active_run_ids == {active_id}
     widget.queue().items[0].prompt = "Changed after start"
 
     assert window._wavespeed_queue_active.items[0].prompt == "Original scene"
@@ -858,11 +858,12 @@ def test_running_wavespeed_queue_uses_frozen_jobs_and_disables_edits(tmp_path: P
     widget.set_item_update(widget.queue().items[0])
     assert not widget.table.cellWidget(0, widget.RETRY_COLUMN).isEnabled()
     window._wavespeed_queue_active.items[0].status = QueueStatus.COMPLETED
-    widget.set_active_run({active_id}, running=False)
     started = []
     monkeypatch.setattr(window, "_start_wavespeed_queue", lambda: started.append(True))
     window._handle_wavespeed_event("queue_finished", None)
     assert started == []
+    assert widget._active_run_ids == {active_id}
+    assert widget._active_run_running is False
     assert "finalizada" in widget.active_run_label.text().lower()
     assert "Next scene" in widget.next_run_label.text()
     assert widget.queue().items[0].status == QueueStatus.COMPLETED
