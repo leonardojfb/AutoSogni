@@ -761,7 +761,9 @@ def test_wavespeed_queue_panel_adds_rows_and_exposes_retry(tmp_path: Path):
     assert item.video_path == "video.mp4"
     assert item.status == QueueStatus.PENDING
     assert window.wavespeed_queue_widget.has_retry_control(item.item_id)
-    assert window.wavespeed_queue_widget.table.item(0, 9).text() == "-"
+    assert window.wavespeed_queue_widget.table.item(
+        0, window.wavespeed_queue_widget.PRICE_COLUMN
+    ).text() == "-"
     assert window.wavespeed_queue_widget.estimate_button.text() == "Estimar costos"
     assert window.wavespeed_queue_widget.total_price_label.text() == "Total estimado: no calculado"
     assert window.wavespeed_queue_estimate_button.text() == "Estimar costos cola"
@@ -797,11 +799,11 @@ def test_wavespeed_queue_restores_task_and_reference_details():
     )
     widget.load_queue(WaveSpeedQueue(items=[item]))
 
-    assert "person.png" in widget.table.item(0, 1).text()
-    assert "motion.mp4" in widget.table.item(0, 1).text()
-    assert widget.table.item(0, 9).text() == "$1.2500"
-    assert widget.table.item(0, 11).text() == "prediction-1"
-    assert widget.table.item(0, 12).text() == "C:/outputs/result.mp4"
+    assert "person.png" in widget.table.item(0, widget.REFERENCES_COLUMN).text()
+    assert "motion.mp4" in widget.table.item(0, widget.REFERENCES_COLUMN).text()
+    assert widget.table.item(0, widget.PRICE_COLUMN).text() == "$1.2500"
+    assert widget.table.item(0, widget.TASK_COLUMN).text() == "prediction-1"
+    assert widget.table.item(0, widget.OUTPUT_COLUMN).text() == "C:/outputs/result.mp4"
 
 
 def test_running_wavespeed_queue_uses_frozen_jobs_and_disables_edits(tmp_path: Path, monkeypatch):
@@ -1239,7 +1241,8 @@ def test_wavespeed_queue_event_updates_row_and_retry_button(tmp_path: Path):
 
     window._handle_wavespeed_event("queue_item", item)
 
-    assert window.wavespeed_queue_widget.table.item(0, 10).text() == QueueStatus.FAILED
-    assert window.wavespeed_queue_widget.table.item(0, 11).text() == "pred-1"
-    assert window.wavespeed_queue_widget.table.item(0, 13).text() == "bad video"
-    assert window.wavespeed_queue_widget.table.cellWidget(0, 14).isEnabled()
+    widget = window.wavespeed_queue_widget
+    assert widget.table.item(0, widget.STATUS_COLUMN).text() == QueueStatus.FAILED
+    assert widget.table.item(0, widget.TASK_COLUMN).text() == "pred-1"
+    assert widget.table.item(0, widget.ERROR_COLUMN).text() == "bad video"
+    assert widget.table.cellWidget(0, widget.RETRY_COLUMN).isEnabled()
