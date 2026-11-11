@@ -18,7 +18,7 @@ def _wheel_event() -> QWheelEvent:
     )
 
 
-def test_numeric_inputs_ignore_mouse_wheel_and_remain_editable():
+def test_numeric_inputs_consume_mouse_wheel_without_changing_values():
     app = QApplication.instance() or QApplication([])
     for spin_box, value in (
         (WheelSafeSpinBox(), 5),
@@ -26,17 +26,21 @@ def test_numeric_inputs_ignore_mouse_wheel_and_remain_editable():
     ):
         spin_box.setRange(0, 10)
         spin_box.setValue(value)
-        app.sendEvent(spin_box, _wheel_event())
+        event = _wheel_event()
+        app.sendEvent(spin_box, event)
         assert spin_box.value() == value
+        assert event.isAccepted()
         assert spin_box.lineEdit().isReadOnly() is False
 
 
-def test_combo_box_ignores_mouse_wheel_and_remains_selectable():
+def test_combo_box_consumes_mouse_wheel_without_changing_selection():
     app = QApplication.instance() or QApplication([])
     combo = WheelSafeComboBox()
     combo.addItems(["first", "second", "third"])
     combo.setCurrentIndex(1)
-    app.sendEvent(combo, _wheel_event())
+    event = _wheel_event()
+    app.sendEvent(combo, event)
     assert combo.currentIndex() == 1
+    assert event.isAccepted()
     combo.setCurrentIndex(2)
     assert combo.currentIndex() == 2
