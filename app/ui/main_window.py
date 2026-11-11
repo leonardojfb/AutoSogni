@@ -93,6 +93,7 @@ try:
         QPushButton,
         QProgressBar,
         QScrollArea,
+        QSizePolicy,
         QTableWidget,
         QTableWidgetItem,
         QTabWidget,
@@ -186,6 +187,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(top)
 
         self.tabs = QTabWidget()
+        self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.tabs.addTab(self._campaign_tab(), "Campaign")
         self.tabs.addTab(self._frames_tab(), "Frames")
         self.tabs.addTab(self._prompts_tab(), "Prompts")
@@ -365,8 +367,9 @@ class MainWindow(QMainWindow):
         inner = QWidget()
         layout = QVBoxLayout(inner)
 
-        connection = QGroupBox("WaveSpeedAI · conexión")
+        connection = QWidget()
         connection_form = QGridLayout(connection)
+        connection_form.setContentsMargins(0, 0, 0, 0)
         self.wavespeed_api_key_edit = QLineEdit(self.wavespeed_key_store.get())
         self.wavespeed_api_key_edit.setEchoMode(QLineEdit.Password)
         save_key = QPushButton("Guardar clave")
@@ -378,9 +381,9 @@ class MainWindow(QMainWindow):
         connection_form.addWidget(QLabel("API key"), 0, 0)
         connection_form.addWidget(self.wavespeed_api_key_edit, 0, 1)
         connection_form.addWidget(save_key, 0, 2)
-        connection_form.addWidget(test_key, 1, 0)
+        connection_form.addWidget(test_key, 0, 3)
         connection_form.addWidget(self.wavespeed_connection_label, 1, 1)
-        connection_form.addWidget(self.wavespeed_balance_label, 1, 2)
+        connection_form.addWidget(self.wavespeed_balance_label, 1, 2, 1, 2)
         self.wavespeed_model_combo = WheelSafeComboBox()
         self.wavespeed_model_combo.addItem("WAN 3.0 Reference-to-Video", WAN_MODEL_ID)
         self.wavespeed_model_combo.addItem("Seedance 2.0 Text-to-Video", SEEDANCE_MODEL_ID)
@@ -392,19 +395,22 @@ class MainWindow(QMainWindow):
         self.wavespeed_endpoint_label = endpoint
         endpoint.setTextInteractionFlags(Qt.TextSelectableByMouse)
         endpoint.setWordWrap(True)
-        connection_form.addWidget(endpoint, 3, 0, 1, 3)
+        self.wavespeed_model_combo.setToolTip("El modelo y su endpoint se actualizan al cambiar la selección.")
         layout.addWidget(connection)
 
-        prompt_group = QGroupBox("Prompt")
+        prompt_group = QWidget()
         prompt_layout = QVBoxLayout(prompt_group)
+        prompt_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_layout.addWidget(QLabel("Prompt"))
         self.wavespeed_prompt_edit = QTextEdit()
         self.wavespeed_prompt_edit.setPlaceholderText("Describe la escena, movimiento, cámara, iluminación y cómo debe usarse cada referencia.")
-        self.wavespeed_prompt_edit.setMinimumHeight(100)
+        self.wavespeed_prompt_edit.setFixedHeight(72)
         prompt_layout.addWidget(self.wavespeed_prompt_edit)
         layout.addWidget(prompt_group)
 
-        references = QGroupBox("Referencias multimodales")
+        references = QWidget()
         references_layout = QGridLayout(references)
+        references_layout.setContentsMargins(0, 0, 0, 0)
         self.wavespeed_reference_lists: dict[str, QListWidget] = {}
         self.wavespeed_reference_labels: dict[str, QLabel] = {}
         self.wavespeed_reference_boxes: dict[str, QWidget] = {}
@@ -419,7 +425,7 @@ class MainWindow(QMainWindow):
             box_layout.setContentsMargins(0, 0, 0, 0)
             list_widget = QListWidget()
             list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-            list_widget.setMinimumHeight(95)
+            list_widget.setFixedHeight(68)
             self.wavespeed_reference_lists[kind] = list_widget
             self.wavespeed_reference_boxes[kind] = box
             count_label = QLabel(label)
@@ -437,8 +443,9 @@ class MainWindow(QMainWindow):
             references_layout.addWidget(box, 0, column)
         layout.addWidget(references)
 
-        parameters = QGroupBox("Parámetros del modelo")
+        parameters = QWidget()
         parameters_form = QGridLayout(parameters)
+        parameters_form.setContentsMargins(0, 0, 0, 0)
         self.wavespeed_resolution_combo = WheelSafeComboBox()
         self.wavespeed_resolution_combo.addItems([*WAVESPEED_RESOLUTIONS, "4k"])
         self.wavespeed_resolution_combo.setCurrentText("720p")
@@ -475,8 +482,9 @@ class MainWindow(QMainWindow):
         parameters_form.addWidget(self.wavespeed_safety_checker_check, 3, 0, 1, 2)
         layout.addWidget(parameters)
 
-        advanced = QGroupBox("Opciones API avanzadas")
+        advanced = QWidget()
         advanced_form = QGridLayout(advanced)
+        advanced_form.setContentsMargins(0, 0, 0, 0)
         self.wavespeed_sync_check = QCheckBox("enable_sync_mode")
         self.wavespeed_base64_check = QCheckBox("enable_base64_output")
         self.wavespeed_webhook_edit = QLineEdit()
@@ -489,8 +497,9 @@ class MainWindow(QMainWindow):
         advanced_form.addWidget(QLabel("Sync y Base64 no son compatibles con webhook. El Safety Checker solo está documentado en Playground."), 2, 0, 1, 3)
         layout.addWidget(advanced)
 
-        output = QGroupBox("Estimación, salida y ejecución")
+        output = QWidget()
         output_form = QGridLayout(output)
+        output_form.setContentsMargins(0, 0, 0, 0)
         self.wavespeed_output_edit = QLineEdit(str(data_dir() / "wavespeed_outputs"))
         choose_output = QPushButton("Carpeta")
         choose_output.clicked.connect(self._wavespeed_choose_output)
@@ -513,18 +522,16 @@ class MainWindow(QMainWindow):
         delete = QPushButton("Eliminar tarea")
         delete.clicked.connect(self._wavespeed_delete_task)
         output_form.addWidget(QLabel("Output"), 0, 0)
-        output_form.addWidget(self.wavespeed_output_edit, 0, 1)
-        output_form.addWidget(choose_output, 0, 2)
+        output_form.addWidget(self.wavespeed_output_edit, 0, 1, 1, 3)
+        output_form.addWidget(choose_output, 0, 4)
         output_form.addWidget(estimate, 1, 0)
         output_form.addWidget(self.wavespeed_price_label, 1, 1)
         output_form.addWidget(self.wavespeed_generate_button, 1, 2)
-        output_form.addWidget(self.wavespeed_queue_estimate_button, 2, 0)
-        output_form.addWidget(self.wavespeed_queue_total_label, 2, 1)
-        output_form.addWidget(cancel_polling, 2, 2)
-        output_form.addWidget(self.wavespeed_queue_add_button, 3, 0)
-        output_form.addWidget(self.wavespeed_task_edit, 4, 0, 1, 2)
-        output_form.addWidget(query, 4, 2)
-        output_form.addWidget(delete, 5, 2)
+        output_form.addWidget(self.wavespeed_queue_add_button, 1, 3)
+        output_form.addWidget(cancel_polling, 1, 4)
+        output_form.addWidget(self.wavespeed_task_edit, 2, 0, 1, 3)
+        output_form.addWidget(query, 2, 3)
+        output_form.addWidget(delete, 2, 4)
         layout.addWidget(output)
 
         self.wavespeed_status_label = QLabel("Listo. Agregá al menos una referencia.")
@@ -533,7 +540,7 @@ class MainWindow(QMainWindow):
         self.wavespeed_progress.setVisible(False)
         self.wavespeed_raw_edit = QTextEdit()
         self.wavespeed_raw_edit.setReadOnly(True)
-        self.wavespeed_raw_edit.setMaximumHeight(150)
+        self.wavespeed_raw_edit.setFixedHeight(65)
         layout.addWidget(self.wavespeed_status_label)
         layout.addWidget(self.wavespeed_progress)
         layout.addWidget(self.wavespeed_raw_edit)
@@ -556,8 +563,6 @@ class MainWindow(QMainWindow):
         self.wavespeed_campaign_new_button = self.wavespeed_queue_widget.campaign_new_button
         self.wavespeed_execution_mode_combo = self.wavespeed_queue_widget.execution_mode_combo
         self._load_wavespeed_campaigns()
-        layout.addWidget(self.wavespeed_queue_widget)
-
         self.wavespeed_history_table = QTableWidget(0, 6)
         self.wavespeed_history_table.setHorizontalHeaderLabels(["Task", "Modelo", "Estado", "Archivo", "Creado", "Error"])
         self.wavespeed_history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -565,7 +570,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.wavespeed_history_table)
 
         scroll.setWidget(inner)
-        outer.addWidget(scroll)
+        outer.addWidget(scroll, 3)
+        outer.addWidget(self.wavespeed_queue_widget, 2)
         self._wavespeed_refresh_history()
         self._wavespeed_update_advanced_controls()
         self._wavespeed_model_changed()
@@ -818,6 +824,7 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         self.image_tabs = QTabWidget()
+        self.image_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self._image_edit_controls = {}
         self.image_tabs.addTab(self._scrollable_image_page(self._face_swap_tab()), "Face Swap")
         self.image_tabs.addTab(self._scrollable_image_page(self._flux_tab()), "Flux Edit")
@@ -1839,6 +1846,8 @@ class MainWindow(QMainWindow):
         references = {kind: list(snapshot[kind]) for kind in
                       ("reference_images", "reference_videos", "reference_audios")}
         try:
+            if snapshot["webhook_url"] and (snapshot["enable_sync_mode"] or snapshot["enable_base64_output"]):
+                raise ValueError("Sync y Base64 no son compatibles con webhook.")
             if model_id == WAN_MODEL_ID:
                 build_reference_video_payload(
                     prompt=snapshot["prompt"], **references,
@@ -1846,6 +1855,8 @@ class MainWindow(QMainWindow):
                     duration=snapshot["duration"],
                     enable_prompt_expansion=snapshot["enable_prompt_expansion"],
                     enable_audio=snapshot["enable_audio"], seed=snapshot["seed"],
+                    enable_sync_mode=snapshot["enable_sync_mode"],
+                    enable_base64_output=snapshot["enable_base64_output"],
                 )
             else:
                 build_seedance_payload(
@@ -1867,9 +1878,13 @@ class MainWindow(QMainWindow):
             enable_prompt_expansion=snapshot["enable_prompt_expansion"],
             enable_audio=snapshot["enable_audio"], seed=snapshot["seed"],
             model_id=model_id, safety_checker=snapshot["safety_checker"],
+            enable_sync_mode=snapshot["enable_sync_mode"],
+            enable_base64_output=snapshot["enable_base64_output"],
+            webhook_url=snapshot["webhook_url"],
         )
         queue = self.wavespeed_queue_widget.queue()
         queue.output_dir = snapshot["output_dir"]
+        self.wavespeed_queue_widget.output_edit.setText(snapshot["output_dir"])
         self.wavespeed_queue_widget.append_item(item)
         if self._wavespeed_queue_running:
             self._persist_wavespeed_campaign_queue(queue)
@@ -2200,9 +2215,6 @@ class MainWindow(QMainWindow):
         self._wavespeed_queue_cancel_event.clear()
         self._wavespeed_queue_running = True
         self.wavespeed_queue_widget.set_running(True)
-        self.wavespeed_queue_widget.set_active_run(
-            {item.item_id for item in queue.items}, running=True,
-        )
         self._persist_wavespeed_campaign_queue(self.wavespeed_queue_widget.queue())
         self.wavespeed_queue_widget.set_error("Cola iniciada.")
         thread = threading.Thread(target=self._run_wavespeed_queue, args=(queue,), daemon=True)
@@ -3032,10 +3044,6 @@ class MainWindow(QMainWindow):
             if finished_queue is not None:
                 for item in finished_queue.items:
                     self.wavespeed_queue_widget.set_item_update(item)
-            self.wavespeed_queue_widget.set_active_run(
-                {item.item_id for item in finished_queue.items} if finished_queue else set(),
-                running=False,
-            )
             self._persist_wavespeed_campaign_queue(self.wavespeed_queue_widget.queue())
             self._wavespeed_queue_running = False
             self._wavespeed_queue_active = None

@@ -33,26 +33,25 @@ class WaveSpeedQueueWidget(QWidget):
     save_campaign_requested = Signal()
     delete_campaign_requested = Signal()
 
-    RUN_GROUP_COLUMN = 0
-    INDEX_COLUMN = 1
-    REFERENCES_COLUMN = 2
-    PROMPT_COLUMN = 3
-    RESOLUTION_COLUMN = 4
-    ASPECT_COLUMN = 5
-    DURATION_COLUMN = 6
-    AUDIO_COLUMN = 7
-    EXPANSION_COLUMN = 8
-    SEED_COLUMN = 9
-    PRICE_COLUMN = 10
-    STATUS_COLUMN = 11
-    TASK_COLUMN = 12
-    OUTPUT_COLUMN = 13
-    ERROR_COLUMN = 14
-    RETRY_COLUMN = 15
-    MODEL_COLUMN = 16
+    INDEX_COLUMN = 0
+    REFERENCES_COLUMN = 1
+    PROMPT_COLUMN = 2
+    RESOLUTION_COLUMN = 3
+    ASPECT_COLUMN = 4
+    DURATION_COLUMN = 5
+    AUDIO_COLUMN = 6
+    EXPANSION_COLUMN = 7
+    SEED_COLUMN = 8
+    PRICE_COLUMN = 9
+    STATUS_COLUMN = 10
+    TASK_COLUMN = 11
+    OUTPUT_COLUMN = 12
+    ERROR_COLUMN = 13
+    RETRY_COLUMN = 14
+    MODEL_COLUMN = 15
 
     COLUMNS = (
-        "Tanda", "#", "Referencias", "Prompt", "Resolution", "Aspect", "Duration",
+        "#", "Referencias", "Prompt", "Resolution", "Aspect", "Duration",
         "Audio", "Expand / Web", "Seed", "Price", "Status", "Task", "Output",
         "Error", "Retry", "Model",
     )
@@ -61,8 +60,6 @@ class WaveSpeedQueueWidget(QWidget):
         super().__init__(parent)
         self._queue = WaveSpeedQueue()
         self._running = False
-        self._active_run_ids: set[str] = set()
-        self._active_run_running = False
         self._retry_buttons: dict[str, QPushButton] = {}
         self._build_ui()
 
@@ -80,7 +77,6 @@ class WaveSpeedQueueWidget(QWidget):
         self.campaign_save_button.clicked.connect(self.save_campaign_requested.emit)
         self.campaign_delete_button = QPushButton("Eliminar campaña")
         self.campaign_delete_button.clicked.connect(self.delete_campaign_requested.emit)
-        campaign_row.addWidget(QLabel("Modo"))
         self.execution_mode_combo = WheelSafeComboBox()
         self.execution_mode_combo.addItem("Secuencial", "sequential")
         self.execution_mode_combo.addItem("Paralelo", "parallel")
@@ -92,7 +88,6 @@ class WaveSpeedQueueWidget(QWidget):
         campaign_row.addWidget(self.campaign_save_button)
         campaign_row.addWidget(self.campaign_delete_button)
         layout.addLayout(campaign_row)
-        layout.addWidget(QLabel("Cola WaveSpeed · cada fila conserva su prompt y referencias"))
 
         frame_row = QHBoxLayout()
         self.frame_edit = QLineEdit()
@@ -113,20 +108,6 @@ class WaveSpeedQueueWidget(QWidget):
 
         self.output_edit = QLineEdit()
         self.output_edit.setPlaceholderText("Carpeta de salida; usa la carpeta por defecto si queda vacía")
-        choose_output = QPushButton("Carpeta")
-        choose_output.clicked.connect(self._choose_output)
-        output_row = QHBoxLayout()
-        output_row.addWidget(QLabel("Output"))
-        output_row.addWidget(self.output_edit, 1)
-        output_row.addWidget(choose_output)
-        layout.addLayout(output_row)
-
-        self.active_run_label = QLabel("Ejecución actual: ninguna.")
-        self.active_run_label.setWordWrap(True)
-        self.next_run_label = QLabel("Próxima ejecución: sin jobs pendientes.")
-        self.next_run_label.setWordWrap(True)
-        layout.addWidget(self.active_run_label)
-        layout.addWidget(self.next_run_label)
 
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
@@ -136,6 +117,7 @@ class WaveSpeedQueueWidget(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.itemChanged.connect(self._item_changed)
+        self.table.setMinimumHeight(150)
         layout.addWidget(self.table)
 
         controls = QHBoxLayout()
@@ -208,7 +190,6 @@ class WaveSpeedQueueWidget(QWidget):
         self._queue.items.append(item)
         self._append_row(item)
         self._update_status()
-        self._refresh_run_groups()
         self.queue_changed.emit()
 
     def add_video(self, video_path: str) -> WaveSpeedQueueItem:
@@ -241,7 +222,6 @@ class WaveSpeedQueueWidget(QWidget):
         if not references and item.video_path:
             references = [f"V: {Path(item.video_path).name}"]
         cells = {
-            self.RUN_GROUP_COLUMN: self._text_item(self._run_group_for(item)),
             self.INDEX_COLUMN: self._text_item(row + 1),
             self.REFERENCES_COLUMN: self._text_item(", ".join(references)),
             self.PROMPT_COLUMN: self._text_item(item.prompt, editable=True),
@@ -311,7 +291,6 @@ class WaveSpeedQueueWidget(QWidget):
             self.table.removeRow(row)
         self._renumber_rows()
         self._update_status()
-        self._refresh_run_groups()
         self.queue_changed.emit()
 
     def _renumber_rows(self) -> None:
@@ -333,9 +312,6 @@ class WaveSpeedQueueWidget(QWidget):
 
     def load_queue(self, queue: WaveSpeedQueue) -> None:
         self._queue = queue
-        if not self._running:
-            self._active_run_ids.clear()
-            self._active_run_running = False
         self.frame_edit.setText(queue.frame_path)
         self.output_edit.setText(queue.output_dir)
         self.execution_mode_combo.blockSignals(True)
@@ -347,7 +323,6 @@ class WaveSpeedQueueWidget(QWidget):
         for item in queue.items:
             self._append_row(item)
         self._update_status()
-        self._refresh_run_groups()
 
     def queue(self) -> WaveSpeedQueue:
         for row in range(self.table.rowCount()):
@@ -377,11 +352,6 @@ class WaveSpeedQueueWidget(QWidget):
             if button is not None:
                 button.setEnabled(not running and item.status == QueueStatus.FAILED)
 
-    def set_active_run(self, item_ids: set[str], running: bool) -> None:
-        self._active_run_ids = set(item_ids)
-        self._active_run_running = running
-        self._refresh_run_groups()
-
     def set_item_update(self, updated: WaveSpeedQueueItem) -> None:
         existing = next((item for item in self._queue.items if item.item_id == updated.item_id), None)
         if existing is not None:
@@ -400,50 +370,10 @@ class WaveSpeedQueueWidget(QWidget):
                 not self._running and updated.status == QueueStatus.FAILED
             )
             break
-        self._refresh_run_groups()
 
     @staticmethod
     def _model_name(item: WaveSpeedQueueItem) -> str:
         return "Seedance 2.0" if "seedance" in item.model_id else "WAN 3.0"
-
-    def _run_group_for(self, item: WaveSpeedQueueItem) -> str:
-        if item.item_id in self._active_run_ids:
-            return "Actual"
-        if item.status in {QueueStatus.PENDING, QueueStatus.PAUSED}:
-            return "Próxima"
-        return "—"
-
-    @staticmethod
-    def _summary_line(position: int, item: WaveSpeedQueueItem) -> str:
-        prompt = " ".join(item.prompt.split()) or "(sin prompt)"
-        if len(prompt) > 80:
-            prompt = f"{prompt[:77]}..."
-        model = "Seedance 2.0" if "seedance" in item.model_id else "WAN 3.0"
-        return (f"#{position} · {model} · {prompt} · I:{len(item.reference_images)} "
-                f"V:{len(item.reference_videos)} A:{len(item.reference_audios)}")
-
-    def _refresh_run_groups(self) -> None:
-        positions = {item.item_id: index for index, item in enumerate(self._queue.items, start=1)}
-        active = [item for item in self._queue.items if item.item_id in self._active_run_ids]
-        upcoming = [item for item in self._queue.items
-                    if item.item_id not in self._active_run_ids
-                    and item.status in {QueueStatus.PENDING, QueueStatus.PAUSED}]
-        if active:
-            state = "bloqueada" if self._active_run_running else "finalizada"
-            lines = "\n".join(self._summary_line(positions[item.item_id], item) for item in active)
-            self.active_run_label.setText(f"Ejecución actual — {state} ({len(active)} job(s))\n{lines}")
-        else:
-            self.active_run_label.setText("Ejecución actual: ninguna.")
-        if upcoming:
-            lines = "\n".join(self._summary_line(positions[item.item_id], item) for item in upcoming)
-            self.next_run_label.setText(f"Próxima ejecución — {len(upcoming)} job(s) listo(s)\n{lines}")
-        else:
-            self.next_run_label.setText("Próxima ejecución: sin jobs pendientes.")
-        for row in range(self.table.rowCount()):
-            item_id = self.table.item(row, self.STATUS_COLUMN).data(Qt.UserRole)
-            item = next((value for value in self._queue.items if value.item_id == item_id), None)
-            if item is not None:
-                self.table.item(row, self.RUN_GROUP_COLUMN).setText(self._run_group_for(item))
 
     def has_retry_control(self, item_id: str) -> bool:
         return item_id in self._retry_buttons

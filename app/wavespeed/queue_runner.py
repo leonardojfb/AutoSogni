@@ -55,7 +55,8 @@ class WaveSpeedQueueRunner:
             prompt=item.prompt, **references,
             resolution=item.resolution, aspect_ratio=item.aspect_ratio, duration=item.duration,
             enable_prompt_expansion=item.enable_prompt_expansion, enable_audio=item.enable_audio,
-            seed=item.seed, enable_sync_mode=False, enable_base64_output=False,
+            seed=item.seed, enable_sync_mode=item.enable_sync_mode,
+            enable_base64_output=item.enable_base64_output,
         )
 
     @staticmethod
@@ -92,7 +93,9 @@ class WaveSpeedQueueRunner:
             return self.client.estimate_price(payload)
         return self.client.estimate_price(payload, model_id=model_id)
 
-    def _submit(self, payload: dict[str, Any], model_id: str):
+    def _submit(self, payload: dict[str, Any], model_id: str, webhook_url: str = ""):
+        if webhook_url:
+            return self.client.submit(payload, webhook_url=webhook_url, model_id=model_id)
         if model_id == MODEL_ID:
             return self.client.submit(payload)
         return self.client.submit(payload, model_id=model_id)
@@ -128,7 +131,7 @@ class WaveSpeedQueueRunner:
                         self._notify(item)
                     except Exception:
                         item.price = None
-                    prediction = self._submit(payload, item.model_id)
+                    prediction = self._submit(payload, item.model_id, item.webhook_url)
                     item.task_id = prediction.id
                     self._notify(item)
                 if prediction.status in TERMINAL_STATUSES:
@@ -191,7 +194,7 @@ class WaveSpeedQueueRunner:
             if item.task_id:
                 prediction = self.client.get_result(item.task_id)
             else:
-                prediction = self._submit(payload, item.model_id)
+                prediction = self._submit(payload, item.model_id, item.webhook_url)
                 item.task_id = prediction.id
             self._notify(item)
             return item, prediction

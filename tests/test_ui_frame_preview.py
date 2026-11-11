@@ -827,8 +827,6 @@ def test_running_wavespeed_queue_uses_frozen_jobs_and_disables_edits(tmp_path: P
     monkeypatch.setattr("app.ui.main_window.threading.Thread.start", lambda self: None)
 
     window._start_wavespeed_queue()
-    active_id = window._wavespeed_queue_active.items[0].item_id
-    assert widget._active_run_ids == {active_id}
     widget.queue().items[0].prompt = "Changed after start"
 
     assert window._wavespeed_queue_active.items[0].prompt == "Original scene"
@@ -849,13 +847,8 @@ def test_running_wavespeed_queue_uses_frozen_jobs_and_disables_edits(tmp_path: P
     assert widget.queue().items[1].reference_images == [str(next_frame)]
     assert widget.queue().items[1].reference_videos == [str(next_video)]
     assert widget.queue().items[1].prompt == "Next scene"
-    assert "Ejecución actual" in widget.active_run_label.text()
-    assert "Original scene" in widget.active_run_label.text()
-    assert "Next scene" not in widget.active_run_label.text()
-    assert "Próxima ejecución" in widget.next_run_label.text()
-    assert "Next scene" in widget.next_run_label.text()
-    assert widget.table.item(0, widget.RUN_GROUP_COLUMN).text() == "Actual"
-    assert widget.table.item(1, widget.RUN_GROUP_COLUMN).text() == "Próxima"
+    assert widget.table.item(0, widget.PROMPT_COLUMN).text() == "Original scene"
+    assert widget.table.item(1, widget.PROMPT_COLUMN).text() == "Next scene"
     widget.queue().items[0].status = QueueStatus.FAILED
     widget.set_item_update(widget.queue().items[0])
     assert not widget.table.cellWidget(0, widget.RETRY_COLUMN).isEnabled()
@@ -864,10 +857,6 @@ def test_running_wavespeed_queue_uses_frozen_jobs_and_disables_edits(tmp_path: P
     monkeypatch.setattr(window, "_start_wavespeed_queue", lambda: started.append(True))
     window._handle_wavespeed_event("queue_finished", None)
     assert started == []
-    assert widget._active_run_ids == {active_id}
-    assert widget._active_run_running is False
-    assert "finalizada" in widget.active_run_label.text().lower()
-    assert "Next scene" in widget.next_run_label.text()
     assert widget.queue().items[0].status == QueueStatus.COMPLETED
     campaigns, _active_id = window.wavespeed_campaign_store.load()
     assert campaigns[0].queue.items[0].status == QueueStatus.COMPLETED
@@ -1089,6 +1078,14 @@ def test_add_to_wan_queue_captures_each_jobs_own_prompt_and_references(tmp_path:
 
     add_reference("reference_images", "C:/frames/frame-a.png")
     add_reference("reference_videos", "C:/videos/video-1.mp4")
+    window.wavespeed_resolution_combo.setCurrentText("1080p")
+    window.wavespeed_aspect_combo.setCurrentText("9:16")
+    window.wavespeed_duration_spin.setValue(7)
+    window.wavespeed_audio_check.setChecked(False)
+    window.wavespeed_prompt_expansion_check.setChecked(True)
+    window.wavespeed_random_seed_check.setChecked(False)
+    window.wavespeed_seed_spin.setValue(42)
+    window.wavespeed_sync_check.setChecked(True)
     window._wavespeed_add_current_to_queue()
     window.wavespeed_reference_lists["reference_images"].clear()
     window.wavespeed_reference_lists["reference_videos"].clear()
@@ -1096,6 +1093,13 @@ def test_add_to_wan_queue_captures_each_jobs_own_prompt_and_references(tmp_path:
     add_reference("reference_videos", "C:/videos/video-2.mp4")
     add_reference("reference_audios", "C:/audio/voice-2.mp3")
     window.wavespeed_prompt_edit.setPlainText("Second movement")
+    window.wavespeed_resolution_combo.setCurrentText("720p")
+    window.wavespeed_aspect_combo.setCurrentText("16:9")
+    window.wavespeed_duration_spin.setValue(9)
+    window.wavespeed_audio_check.setChecked(True)
+    window.wavespeed_prompt_expansion_check.setChecked(False)
+    window.wavespeed_seed_spin.setValue(99)
+    window.wavespeed_sync_check.setChecked(False)
     window._wavespeed_add_current_to_queue()
 
     first, second = window.wavespeed_queue_widget.queue().items
@@ -1103,9 +1107,53 @@ def test_add_to_wan_queue_captures_each_jobs_own_prompt_and_references(tmp_path:
         "First movement", ["C:/frames/frame-a.png"], ["C:/videos/video-1.mp4"], [])
     assert (second.prompt, second.reference_images, second.reference_videos, second.reference_audios) == (
         "Second movement", ["C:/frames/frame-b.png"], ["C:/videos/video-2.mp4"], ["C:/audio/voice-2.mp3"])
+    assert (first.duration, first.enable_sync_mode) == (7, True)
+    assert (second.duration, second.enable_sync_mode) == (9, False)
+    assert (first.resolution, first.aspect_ratio, first.enable_audio,
+            first.enable_prompt_expansion, first.seed) == ("1080p", "9:16", False, True, 42)
+    assert (second.resolution, second.aspect_ratio, second.enable_audio,
+            second.enable_prompt_expansion, second.seed) == ("720p", "16:9", True, False, 99)
     campaigns, _active_id = campaign_store.load()
     assert len(campaigns[0].queue.items) == 2
     assert campaigns[0].queue.items[1].reference_images == ["C:/frames/frame-b.png"]
+    assert campaigns[0].queue.items[0].enable_sync_mode is True
+
+
+def test_wan_queue_is_visible_below_compact_editor_like_flux(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    window = MainWindow(CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "key.txt"),
+                        wavespeed_key_store=ApiKeyStore(tmp_path / "wave-key.txt"),
+                        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+                        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"))
+    window.resize(1100, 650)
+    window.show()
+    window.tabs.setCurrentIndex(5)
+    _app().processEvents()
+    assert window.wavespeed_queue_widget.isVisible()
+    assert window.wavespeed_queue_widget.table.viewport().height() >= 100
+    assert "Tanda" not in window.wavespeed_queue_widget.COLUMNS
+
+
+def test_flux_page_scrolls_at_small_height(tmp_path: Path):
+    _app()
+    db = Database(tmp_path / "app.db")
+    db.initialize()
+    window = MainWindow(CampaignRepository(db), SogniClient(""), ApiKeyStore(tmp_path / "key.txt"),
+                        wavespeed_key_store=ApiKeyStore(tmp_path / "wave-key.txt"),
+                        wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
+                        wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"))
+    window.resize(1000, 500)
+    window.show()
+    window.tabs.setCurrentIndex(7)
+    window.image_tabs.setCurrentIndex(1)
+    flux = window.image_tabs.widget(1)
+    _app().processEvents()
+    assert window.height() <= 550
+    assert window.image_tabs.isVisible()
+    assert flux.isVisible()
+    assert flux.verticalScrollBar().maximum() > 0
 
 
 def test_wavespeed_campaign_controls_are_visible(tmp_path: Path):

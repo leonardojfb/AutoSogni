@@ -25,7 +25,8 @@ def _now() -> str:
 
 def _redact_remote_urls(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: _redact_remote_urls(item) for key, item in value.items()}
+        return {key: item if key == "webhook_url" else _redact_remote_urls(item)
+                for key, item in value.items()}
     if isinstance(value, list):
         return [_redact_remote_urls(item) for item in value]
     if isinstance(value, str) and value.startswith(("http://", "https://")):
@@ -48,6 +49,9 @@ class WaveSpeedQueueItem:
     enable_audio: bool = True
     safety_checker: bool = True
     seed: int = -1
+    enable_sync_mode: bool = False
+    enable_base64_output: bool = False
+    webhook_url: str = ""
     model_id: str = "alibaba/wan-3.0/reference-to-video"
     status: str = QueueStatus.PENDING
     task_id: str = ""
@@ -82,6 +86,9 @@ class WaveSpeedQueueItem:
             "enable_audio",
             "safety_checker",
             "seed",
+            "enable_sync_mode",
+            "enable_base64_output",
+            "webhook_url",
             "model_id",
             "status",
             "task_id",

@@ -410,6 +410,39 @@ def test_runner_uses_each_jobs_own_multimodal_references(tmp_path):
     assert submitted["Second"]["reference_audios"] == ["https://cdn/second.mp3"]
 
 
+def test_wan_queue_preserves_advanced_options_per_job_after_reload(tmp_path):
+    from app.wavespeed.queue_runner import WaveSpeedQueueRunner
+
+    submitted = []
+
+    class Client:
+        def estimate_price(self, payload):
+            return {"price": 0.5}
+
+        def submit(self, payload, *, webhook_url=None, model_id=None):
+            submitted.append((payload, webhook_url))
+            return WaveSpeedPrediction(str(len(submitted)), "completed", outputs=["output"])
+
+    store = WaveSpeedQueueStore(tmp_path / "queue.json")
+    store.save(WaveSpeedQueue(items=[
+        WaveSpeedQueueItem(prompt="First", reference_images=["first.png"],
+                           enable_sync_mode=True, enable_base64_output=True),
+        WaveSpeedQueueItem(prompt="Second", reference_images=["second.png"],
+                           webhook_url="https://example.com/wan-hook"),
+    ]))
+    queue = store.load()
+    WaveSpeedQueueRunner(Client(), upload_file=lambda path: {"download_url": f"https://cdn/{path.name}"},
+                         save_output=lambda *_args: "output.mp4").run(queue)
+
+    assert submitted[0][0]["prompt"] == "First"
+    assert submitted[0][0]["enable_sync_mode"] is True
+    assert submitted[0][0]["enable_base64_output"] is True
+    assert submitted[0][1] is None
+    assert submitted[1][0]["prompt"] == "Second"
+    assert submitted[1][0]["enable_sync_mode"] is False
+    assert submitted[1][1] == "https://example.com/wan-hook"
+
+
 def test_runner_reuploads_reference_changed_between_jobs(tmp_path):
     from app.wavespeed.queue_runner import WaveSpeedQueueRunner
 
