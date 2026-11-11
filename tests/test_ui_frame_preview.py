@@ -1127,12 +1127,16 @@ def test_wan_queue_is_visible_below_compact_editor_like_flux(tmp_path: Path):
                         wavespeed_key_store=ApiKeyStore(tmp_path / "wave-key.txt"),
                         wavespeed_campaign_store=WaveSpeedCampaignStore(tmp_path / "campaigns.json"),
                         wavespeed_queue_store=WaveSpeedQueueStore(tmp_path / "queue.json"))
-    window.resize(1100, 650)
+    window.resize(1100, 800)
     window.show()
     window.tabs.setCurrentIndex(5)
     _app().processEvents()
+    wavespeed = window.tabs.widget(5)
+    assert isinstance(wavespeed, QScrollArea)
     assert window.wavespeed_queue_widget.isVisible()
-    assert window.wavespeed_queue_widget.table.viewport().height() >= 100
+    queue_table = window.wavespeed_queue_widget.table
+    queue_top = queue_table.mapTo(wavespeed.viewport(), queue_table.rect().topLeft())
+    assert wavespeed.viewport().rect().contains(queue_top)
     assert "Tanda" not in window.wavespeed_queue_widget.COLUMNS
 
 

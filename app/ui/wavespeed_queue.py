@@ -117,7 +117,7 @@ class WaveSpeedQueueWidget(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.itemChanged.connect(self._item_changed)
-        self.table.setMinimumHeight(150)
+        self.table.setMinimumHeight(85)
         layout.addWidget(self.table)
 
         controls = QHBoxLayout()

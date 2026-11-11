@@ -360,12 +360,13 @@ class MainWindow(QMainWindow):
         return page
 
     def _wavespeed_tab(self) -> QWidget:
-        page = QWidget()
-        outer = QVBoxLayout(page)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setMinimumSize(0, 0)
         inner = QWidget()
         layout = QVBoxLayout(inner)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(0)
 
         connection = QWidget()
         connection_form = QGridLayout(connection)
@@ -404,7 +405,7 @@ class MainWindow(QMainWindow):
         prompt_layout.addWidget(QLabel("Prompt"))
         self.wavespeed_prompt_edit = QTextEdit()
         self.wavespeed_prompt_edit.setPlaceholderText("Describe la escena, movimiento, cámara, iluminación y cómo debe usarse cada referencia.")
-        self.wavespeed_prompt_edit.setFixedHeight(72)
+        self.wavespeed_prompt_edit.setFixedHeight(46)
         prompt_layout.addWidget(self.wavespeed_prompt_edit)
         layout.addWidget(prompt_group)
 
@@ -425,7 +426,7 @@ class MainWindow(QMainWindow):
             box_layout.setContentsMargins(0, 0, 0, 0)
             list_widget = QListWidget()
             list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-            list_widget.setFixedHeight(68)
+            list_widget.setFixedHeight(30)
             self.wavespeed_reference_lists[kind] = list_widget
             self.wavespeed_reference_boxes[kind] = box
             count_label = QLabel(label)
@@ -437,6 +438,8 @@ class MainWindow(QMainWindow):
             add.clicked.connect(lambda _checked=False, k=kind, f=file_filter: self._wavespeed_add_files(k, f))
             remove = QPushButton("Quitar")
             remove.clicked.connect(lambda _checked=False, k=kind: self._wavespeed_remove_files(k))
+            add.setFixedHeight(22)
+            remove.setFixedHeight(22)
             buttons.addWidget(add)
             buttons.addWidget(remove)
             box_layout.addLayout(buttons)
@@ -469,6 +472,8 @@ class MainWindow(QMainWindow):
         self.wavespeed_seed_spin.setRange(0, 2_147_483_647)
         self.wavespeed_seed_spin.setEnabled(False)
         self.wavespeed_random_seed_check.toggled.connect(self.wavespeed_seed_spin.setDisabled)
+        self.wavespeed_sync_check = QCheckBox("enable_sync_mode")
+        self.wavespeed_base64_check = QCheckBox("enable_base64_output")
         parameters_form.addWidget(QLabel("Resolución"), 0, 0)
         parameters_form.addWidget(self.wavespeed_resolution_combo, 0, 1)
         parameters_form.addWidget(QLabel("Aspect ratio"), 0, 2)
@@ -477,24 +482,23 @@ class MainWindow(QMainWindow):
         parameters_form.addWidget(self.wavespeed_duration_spin, 1, 1)
         parameters_form.addWidget(self.wavespeed_prompt_expansion_check, 1, 2)
         parameters_form.addWidget(self.wavespeed_audio_check, 1, 3)
-        parameters_form.addWidget(self.wavespeed_random_seed_check, 2, 0, 1, 2)
-        parameters_form.addWidget(self.wavespeed_seed_spin, 2, 2)
+        parameters_form.addWidget(self.wavespeed_random_seed_check, 2, 0)
+        parameters_form.addWidget(self.wavespeed_seed_spin, 2, 1)
+        parameters_form.addWidget(self.wavespeed_sync_check, 2, 2)
+        parameters_form.addWidget(self.wavespeed_base64_check, 2, 3)
         parameters_form.addWidget(self.wavespeed_safety_checker_check, 3, 0, 1, 2)
         layout.addWidget(parameters)
 
         advanced = QWidget()
         advanced_form = QGridLayout(advanced)
         advanced_form.setContentsMargins(0, 0, 0, 0)
-        self.wavespeed_sync_check = QCheckBox("enable_sync_mode")
-        self.wavespeed_base64_check = QCheckBox("enable_base64_output")
         self.wavespeed_webhook_edit = QLineEdit()
         self.wavespeed_webhook_edit.setPlaceholderText("https://tu-servidor-publico.example/webhooks/wavespeed")
+        self.wavespeed_webhook_edit.setToolTip("Sync y Base64 no son compatibles con webhook.")
         self.wavespeed_webhook_edit.textChanged.connect(self._wavespeed_update_advanced_controls)
-        advanced_form.addWidget(self.wavespeed_sync_check, 0, 0)
-        advanced_form.addWidget(self.wavespeed_base64_check, 0, 1)
-        advanced_form.addWidget(QLabel("Webhook HTTPS externo"), 1, 0)
-        advanced_form.addWidget(self.wavespeed_webhook_edit, 1, 1, 1, 2)
-        advanced_form.addWidget(QLabel("Sync y Base64 no son compatibles con webhook. El Safety Checker solo está documentado en Playground."), 2, 0, 1, 3)
+        advanced_form.addWidget(QLabel("Webhook HTTPS externo"), 0, 0)
+        advanced_form.addWidget(self.wavespeed_webhook_edit, 0, 1, 1, 2)
+        advanced_form.setColumnStretch(2, 1)
         layout.addWidget(advanced)
 
         output = QWidget()
@@ -540,7 +544,7 @@ class MainWindow(QMainWindow):
         self.wavespeed_progress.setVisible(False)
         self.wavespeed_raw_edit = QTextEdit()
         self.wavespeed_raw_edit.setReadOnly(True)
-        self.wavespeed_raw_edit.setFixedHeight(65)
+        self.wavespeed_raw_edit.setFixedHeight(28)
         layout.addWidget(self.wavespeed_status_label)
         layout.addWidget(self.wavespeed_progress)
         layout.addWidget(self.wavespeed_raw_edit)
@@ -563,15 +567,15 @@ class MainWindow(QMainWindow):
         self.wavespeed_campaign_new_button = self.wavespeed_queue_widget.campaign_new_button
         self.wavespeed_execution_mode_combo = self.wavespeed_queue_widget.execution_mode_combo
         self._load_wavespeed_campaigns()
+        layout.addWidget(self.wavespeed_queue_widget)
         self.wavespeed_history_table = QTableWidget(0, 6)
         self.wavespeed_history_table.setHorizontalHeaderLabels(["Task", "Modelo", "Estado", "Archivo", "Creado", "Error"])
         self.wavespeed_history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.wavespeed_history_table.setFixedHeight(72)
         layout.addWidget(QLabel("Historial local WaveSpeed"))
         layout.addWidget(self.wavespeed_history_table)
 
         scroll.setWidget(inner)
-        outer.addWidget(scroll, 3)
-        outer.addWidget(self.wavespeed_queue_widget, 2)
         self._wavespeed_refresh_history()
         self._wavespeed_update_advanced_controls()
         self._wavespeed_model_changed()
@@ -591,7 +595,7 @@ class MainWindow(QMainWindow):
             self.wavespeed_seed_spin.valueChanged,
         ):
             signal.connect(self._wavespeed_invalidate_price)
-        return page
+        return scroll
 
     def _wavespeed_model_changed(self) -> None:
         model_id = self.wavespeed_model_combo.currentData()
